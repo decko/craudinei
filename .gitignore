@@ -1,0 +1,6 @@
+craudinei
+*.pid
+*.log
+craudinei.yaml
+.craudinei/
+.worktrees/
