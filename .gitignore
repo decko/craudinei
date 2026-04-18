@@ -1,6 +1,28 @@
-craudinei
+# Build output
+/craudinei
+
+# Go
+*.test
+*.out
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config (secrets)
+craudinei.yaml
+
+# Runtime
 *.pid
 *.log
-craudinei.yaml
 .craudinei/
+
+# Worktrees
 .worktrees/

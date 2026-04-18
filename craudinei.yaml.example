@@ -1,0 +1,143 @@
+# Craudinei Configuration
+#
+# This file configures the Craudinei bot that bridges Claude Code sessions
+# with Telegram. Copy this file to ~/.craudinei/craudinei.yaml or the working
+# directory and fill in your values.
+#
+# SECURITY: This file should have 0600 permissions (owner read/write only).
+# The bot validates permissions at startup and refuses to start if group- or
+# world-readable.
+#
+# HOT RELOAD: Run /reload in Telegram to reload non-sensitive fields without
+# restarting. Token and passphrase changes require a full restart.
+#
+# ENV VAR EXPANSION: Sensitive fields (token, auth_passphrase) support
+# ${VAR} syntax for environment variable expansion. Other fields preserve
+# literal $ characters. Only ${VAR} is supported (not $VAR or ${VAR:-default}).
+
+telegram:
+  # Bot token from @BotFather (required).
+  # Use ${VAR} syntax to load from environment variable.
+  # Type: string
+  # Example: "${TELEGRAM_BOT_TOKEN}"
+  token: ""
+
+  # Whitelist of Telegram user IDs allowed to interact with the bot (required).
+  # Find your ID via @userinfobot or the Telegram API.
+  # Type: []int64
+  # Default: none (empty list is invalid)
+  allowed_users:
+    - 123456789
+
+  # Passphrase for /auth command (required).
+  # Use ${VAR} syntax to load from environment variable.
+  # NOTE: Transmitted as a Telegram message - use a non-sensitive passphrase.
+  # Type: string
+  # Example: "${CRAUDINEI_PASSPHRASE}"
+  auth_passphrase: ""
+
+  # How long an authenticated session remains valid before re-auth required.
+  # Type: time.Duration
+  # Default: 1h
+  # Valid range: 0 to 4h
+  auth_idle_timeout: 1h
+
+  # Default timeout for tool approval requests.
+  # Type: time.Duration
+  # Default: 5m
+  approval_timeout: 5m
+
+  # How often to send progress updates during long operations.
+  # Type: time.Duration
+  # Default: 2m
+  progress_interval: 2m
+
+  # How long to wait before warning about session inactivity.
+  # Type: time.Duration
+  # Default: 15m
+  inactivity_timeout: 15m
+
+claude:
+  # Path to Claude Code binary (required, must be absolute path).
+  # Relative paths are rejected at config validation for security.
+  # Type: string
+  # Default: none
+  binary: "/usr/local/bin/claude"
+
+  # Default working directory when /begin is called without arguments.
+  # Type: string
+  # Default: none
+  default_workdir: "/home/user/dev"
+
+  # Additional system prompt appended to Claude Code's default prompt.
+  # Use $HOME, $USER, or other literal $ in examples - these are NOT expanded.
+  # Type: string
+  # Default: "Keep each response under 4000 characters. Wrap lines at 80 characters."
+  system_prompt: "Keep each response under 4000 characters. Wrap lines at 80 characters."
+
+  # Tools that can run without approval. Tools not in this list require
+  # user approval via inline buttons in Telegram.
+  # Type: []string
+  # Default: ["Read", "Grep", "Glob"] (auto-approved)
+  allowed_tools:
+    - Read
+    - Grep
+    - Glob
+
+  # Maximum number of Claude Code turns per session.
+  # Type: int
+  # Default: 50
+  max_turns: 50
+
+  # Maximum USD budget per session. Claude Code's --max-budget-usd is a
+  # soft limit; in-flight requests may exceed it. Craudinei alerts at 80%.
+  # Type: float64
+  # Default: 5.00
+  max_budget_usd: 5.00
+
+  # Allowed working directories for sessions. Users can only /begin in these.
+  # Defense-in-depth: path traversal (..), symlinks, and prefix attacks
+  # (e.g., /home/user/dev-secrets vs /home/user/dev) are all blocked.
+  # Type: []string
+  # Default: none
+  allowed_paths:
+    - "/home/user/dev"
+
+approval:
+  # Port for the approval server. 0 means auto-assign ephemeral port.
+  # The server binds to localhost only (127.0.0.1).
+  # Type: int
+  # Default: 0 (auto-assign)
+  port: 0
+
+  # Timeout for Bash tool approval requests.
+  # Type: time.Duration
+  # Default: 5m
+  timeout_bash: 5m
+
+  # Timeout for Edit tool approval requests.
+  # Type: time.Duration
+  # Default: 5m
+  timeout_edit: 5m
+
+  # Timeout for Write tool approval requests.
+  # Type: time.Duration
+  # Default: 5m
+  timeout_write: 5m
+
+logging:
+  # Log level: debug, info, warn, error.
+  # Type: string
+  # Default: info
+  level: info
+
+  # Path to operational log file. Set to empty string for stdout only.
+  # Type: string
+  # Default: "" (stdout)
+  file: ""
+
+  # Path to audit log file (all auth attempts, commands, tool decisions).
+  # Cannot be disabled - audit logging is always on.
+  # Type: string
+  # Default: "" (stderr)
+  audit_file: ""
