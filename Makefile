@@ -1,10 +1,13 @@
-.PHONY: build run test lint fmt vet clean install-hooks
+.PHONY: build build-all run test lint fmt vet tidy clean check install-hooks
 
 BINARY = craudinei
 BUILD_DIR = ./cmd/craudinei
 
 build:
 	go build -o $(BINARY) $(BUILD_DIR)
+
+build-all:
+	go build ./...
 
 run: build
 	./$(BINARY)
@@ -17,10 +20,21 @@ lint: fmt vet
 
 fmt:
 	@echo "Checking gofmt..."
-	@test -z "$$(gofmt -l . 2>/dev/null)" || { echo "Files need formatting:"; gofmt -l .; exit 1; }
+	@UNFORMATTED=$$(gofmt -l . 2>/dev/null | grep '\.go$$' || true); \
+	if [ -n "$$UNFORMATTED" ]; then \
+		echo "Files need formatting:"; \
+		echo "$$UNFORMATTED"; \
+		echo "Run: gofmt -w <file>"; \
+		exit 1; \
+	fi
 
 vet:
 	go vet ./...
+
+tidy:
+	go mod tidy
+
+check: lint test build-all
 
 clean:
 	rm -f $(BINARY)
