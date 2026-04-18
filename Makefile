@@ -1,10 +1,13 @@
-.PHONY: build run test lint fmt vet clean install-hooks
+.PHONY: build build-all run test lint fmt vet tidy clean check install-hooks
 
 BINARY = craudinei
 BUILD_DIR = ./cmd/craudinei
 
 build:
 	go build -o $(BINARY) $(BUILD_DIR)
+
+build-all:
+	go build ./...
 
 run: build
 	./$(BINARY)
@@ -17,10 +20,21 @@ lint: fmt vet
 
 fmt:
 	@echo "Checking gofmt..."
-	@test -z "$$(gofmt -l . 2>/dev/null)" || { echo "Files need formatting:"; gofmt -l .; exit 1; }
+	@UNFORMATTED=$$(gofmt -l . 2>/dev/null | grep '\.go$$' || true); \
+	if [ -n "$$UNFORMATTED" ]; then \
+		echo "Files need formatting:"; \
+		echo "$$UNFORMATTED"; \
+		echo "Run: gofmt -w <file>"; \
+		exit 1; \
+	fi
 
 vet:
 	go vet ./...
+
+tidy:
+	go mod tidy
+
+check: lint test build-all
 
 clean:
 	rm -f $(BINARY)
@@ -45,17 +59,12 @@ endif
 	@echo '  exit 1' >> .git/hooks/pre-commit
 	@echo 'fi' >> .git/hooks/pre-commit
 	@echo '' >> .git/hooks/pre-commit
-	@echo '# --- Go format check ---' >> .git/hooks/pre-commit
+	@echo '# --- Go auto-format + re-stage ---' >> .git/hooks/pre-commit
 	@echo 'if command -v gofmt &>/dev/null; then' >> .git/hooks/pre-commit
 	@echo '  STAGED_GO=$$(git diff --cached --name-only --diff-filter=ACM | grep "\.go$$" || true)' >> .git/hooks/pre-commit
 	@echo '  if [ -n "$$STAGED_GO" ]; then' >> .git/hooks/pre-commit
-	@echo '    UNFORMATTED=$$(gofmt -l $$STAGED_GO 2>/dev/null || true)' >> .git/hooks/pre-commit
-	@echo '    if [ -n "$$UNFORMATTED" ]; then' >> .git/hooks/pre-commit
-	@echo '      echo "ERROR: files need gofmt:"' >> .git/hooks/pre-commit
-	@echo '      echo "$$UNFORMATTED"' >> .git/hooks/pre-commit
-	@echo '      echo "Run: gofmt -w $$UNFORMATTED"' >> .git/hooks/pre-commit
-	@echo '      exit 1' >> .git/hooks/pre-commit
-	@echo '    fi' >> .git/hooks/pre-commit
+	@echo '    gofmt -w $$STAGED_GO 2>/dev/null || true' >> .git/hooks/pre-commit
+	@echo '    git add $$STAGED_GO' >> .git/hooks/pre-commit
 	@echo '  fi' >> .git/hooks/pre-commit
 	@echo 'fi' >> .git/hooks/pre-commit
 	@echo '' >> .git/hooks/pre-commit
