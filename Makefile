@@ -59,17 +59,12 @@ endif
 	@echo '  exit 1' >> .git/hooks/pre-commit
 	@echo 'fi' >> .git/hooks/pre-commit
 	@echo '' >> .git/hooks/pre-commit
-	@echo '# --- Go format check ---' >> .git/hooks/pre-commit
+	@echo '# --- Go auto-format + re-stage ---' >> .git/hooks/pre-commit
 	@echo 'if command -v gofmt &>/dev/null; then' >> .git/hooks/pre-commit
 	@echo '  STAGED_GO=$$(git diff --cached --name-only --diff-filter=ACM | grep "\.go$$" || true)' >> .git/hooks/pre-commit
 	@echo '  if [ -n "$$STAGED_GO" ]; then' >> .git/hooks/pre-commit
-	@echo '    UNFORMATTED=$$(gofmt -l $$STAGED_GO 2>/dev/null || true)' >> .git/hooks/pre-commit
-	@echo '    if [ -n "$$UNFORMATTED" ]; then' >> .git/hooks/pre-commit
-	@echo '      echo "ERROR: files need gofmt:"' >> .git/hooks/pre-commit
-	@echo '      echo "$$UNFORMATTED"' >> .git/hooks/pre-commit
-	@echo '      echo "Run: gofmt -w $$UNFORMATTED"' >> .git/hooks/pre-commit
-	@echo '      exit 1' >> .git/hooks/pre-commit
-	@echo '    fi' >> .git/hooks/pre-commit
+	@echo '    gofmt -w $$STAGED_GO 2>/dev/null || true' >> .git/hooks/pre-commit
+	@echo '    git add $$STAGED_GO' >> .git/hooks/pre-commit
 	@echo '  fi' >> .git/hooks/pre-commit
 	@echo 'fi' >> .git/hooks/pre-commit
 	@echo '' >> .git/hooks/pre-commit

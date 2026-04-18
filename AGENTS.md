@@ -245,7 +245,7 @@ make install-hooks email=brito.afa@gmail.com
 
 | Hook | What it does |
 |------|-------------|
-| `pre-commit` | Validates author email, runs `gofmt`, `go vet`, and `go build` |
+| `pre-commit` | Validates author email, auto-formats with `gofmt` (re-stages), runs `go vet` and `go build` |
 | `commit-msg` | Validates conventional commit format |
 
 ### Bypassing Hooks
