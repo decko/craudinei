@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,37 +23,49 @@ import (
 	"log/slog"
 )
 
+// SessionData represents the persisted session state.
+type SessionData struct {
+	SessionID string    `json:"session_id"`
+	WorkDir   string    `json:"work_dir"`
+	PID       int       `json:"pid"`
+	StartedAt time.Time `json:"started_at"`
+}
+
 // Manager manages the Claude Code subprocess lifecycle.
 type Manager struct {
-	mu          sync.Mutex
-	cfg         *config.Config
-	sm          *StateMachine
-	queue       *InputQueue
-	router      *router.Router
-	logger      *slog.Logger
-	cmd         *exec.Cmd
-	pid         int
-	pgid        int
-	pidFilePath string
-	stdin       io.WriteCloser
-	stdout      io.Reader
-	wg          sync.WaitGroup
-	cancel      context.CancelFunc
-	readyCh     chan struct{}
-	stopping    atomic.Bool
+	mu              sync.Mutex
+	cfg             *config.Config
+	sm              *StateMachine
+	queue           *InputQueue
+	router          *router.Router
+	logger          *slog.Logger
+	cmd             *exec.Cmd
+	pid             int
+	pgid            int
+	pidFilePath     string
+	sessionFilePath string
+	stdin           io.WriteCloser
+	stdout          io.Reader
+	wg              sync.WaitGroup
+	cancel          context.CancelFunc
+	readyCh         chan struct{}
+	stopping        atomic.Bool
 }
 
 // NewManager creates a new Manager with the given configuration, state machine,
 // input queue, router, and logger.
 func NewManager(cfg *config.Config, sm *StateMachine, queue *InputQueue, router *router.Router, logger *slog.Logger) *Manager {
+	homeDir, _ := os.UserHomeDir()
+	sessionFilePath := filepath.Join(homeDir, ".craudinei", "session.json")
 	return &Manager{
-		cfg:         cfg,
-		sm:          sm,
-		queue:       queue,
-		router:      router,
-		logger:      logger,
-		pidFilePath: "/tmp/craudinei.pid",
-		readyCh:     make(chan struct{}),
+		cfg:             cfg,
+		sm:              sm,
+		queue:           queue,
+		router:          router,
+		logger:          logger,
+		pidFilePath:     "/tmp/craudinei.pid",
+		sessionFilePath: sessionFilePath,
+		readyCh:         make(chan struct{}),
 	}
 }
 
@@ -159,6 +172,10 @@ func (m *Manager) Start(ctx context.Context, workDir string) error {
 	m.cancel = cancel
 	m.startStdinWriter(goroutineCtx)
 	m.startStdoutReader(goroutineCtx)
+
+	// SaveSession() is called by the event handler after the init event sets
+	// the session ID. The session ID is set asynchronously when the subprocess
+	// sends the init event, so we can't save it synchronously here.
 
 	return nil
 }
@@ -301,6 +318,10 @@ func (m *Manager) KillOrphan() error {
 
 	// Remove the stale PID file
 	_ = os.Remove(m.pidFilePath)
+
+	// Remove the stale session file
+	_ = m.RemoveSession()
+
 	return nil
 }
 
@@ -475,6 +496,209 @@ func (m *Manager) removePIDFile() error {
 	if err != nil && !os.IsNotExist(err) {
 		m.logger.Warn("manager: failed to remove PID file", "error", err)
 	}
+	return nil
+}
+
+// SaveSession persists the current session state to the session file.
+// Called after Start() succeeds and after the init event sets the session ID.
+func (m *Manager) SaveSession() error {
+	sessionID := m.sm.state.SessionID()
+	workDir := m.sm.state.WorkDir()
+	startedAt := m.sm.state.StartedAt()
+
+	data := SessionData{
+		SessionID: sessionID,
+		WorkDir:   workDir,
+		PID:       m.pid,
+		StartedAt: startedAt,
+	}
+
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("manager: marshalling session data: %w", err)
+	}
+
+	// Create the directory if it doesn't exist
+	dir := filepath.Dir(m.sessionFilePath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("manager: creating session directory: %w", err)
+	}
+
+	// Write to temp file then rename for atomicity
+	tmpFile := m.sessionFilePath + ".tmp"
+	if err := os.WriteFile(tmpFile, jsonData, 0600); err != nil {
+		return fmt.Errorf("manager: writing session file: %w", err)
+	}
+	if err := os.Rename(tmpFile, m.sessionFilePath); err != nil {
+		return fmt.Errorf("manager: renaming session file: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateSessionID updates the session ID in the state machine and persists
+// the updated session. Called by the event handler after receiving the init
+// event from the subprocess.
+func (m *Manager) UpdateSessionID(sessionID string) error {
+	m.sm.state.SetSessionID(sessionID)
+	return m.SaveSession()
+}
+
+// LoadSession reads the session file and returns the persisted session data.
+// Returns os.ErrNotExist if no session file exists.
+func (m *Manager) LoadSession() (*SessionData, error) {
+	file, err := os.Open(m.sessionFilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, os.ErrNotExist
+		}
+		return nil, fmt.Errorf("manager: opening session file: %w", err)
+	}
+	defer file.Close()
+
+	var data SessionData
+	if err := json.NewDecoder(file).Decode(&data); err != nil {
+		return nil, fmt.Errorf("manager: decoding session file: %w", err)
+	}
+
+	if data.SessionID == "" {
+		return nil, fmt.Errorf("manager: session file missing session_id")
+	}
+	if data.WorkDir == "" {
+		return nil, fmt.Errorf("manager: session file missing work_dir")
+	}
+
+	return &data, nil
+}
+
+// RemoveSession removes the session file. Called during Stop() cleanup.
+func (m *Manager) RemoveSession() error {
+	err := os.Remove(m.sessionFilePath)
+	if err != nil && !os.IsNotExist(err) {
+		m.logger.Warn("manager: failed to remove session file", "error", err)
+	}
+	return nil
+}
+
+// Resume spawns a new subprocess with --resume <session_id> to continue
+// a previous session. It validates the session file exists, loads the
+// session ID and work directory, and starts the subprocess with the
+// --resume flag.
+func (m *Manager) Resume(ctx context.Context, sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.cmd != nil && m.cmd.Process != nil {
+		return fmt.Errorf("manager: subprocess already running with PID %d", m.pid)
+	}
+
+	sessionData, err := m.LoadSession()
+	if err != nil {
+		return fmt.Errorf("manager: loading session %q: %w", sessionID, err)
+	}
+
+	if sessionData.SessionID != sessionID {
+		return fmt.Errorf("manager: session ID mismatch: got %q, want %q", sessionData.SessionID, sessionID)
+	}
+
+	workDir := sessionData.WorkDir
+	if err := config.ValidateWorkDir(workDir, m.cfg.Claude.AllowedPaths); err != nil {
+		return fmt.Errorf("manager: validating work directory: %w", err)
+	}
+
+	if _, ok := os.LookupEnv("ANTHROPIC_API_KEY"); !ok {
+		return fmt.Errorf("manager: ANTHROPIC_API_KEY environment variable is not set")
+	}
+
+	if err := m.sm.Transition(types.StatusStarting); err != nil {
+		return fmt.Errorf("manager: transitioning to starting: %w", err)
+	}
+
+	allowedTools := ""
+	if len(m.cfg.Claude.AllowedTools) > 0 {
+		allowedTools = strings.Join(m.cfg.Claude.AllowedTools, " ")
+	}
+
+	args := []string{
+		"-p",
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--append-system-prompt", m.cfg.Claude.SystemPrompt,
+		"--resume", sessionID,
+	}
+	if allowedTools != "" {
+		args = append(args, "--allowedTools", allowedTools)
+	}
+	args = append(args,
+		"--permission-prompt-tool", "craudinei_approval",
+		"--mcp-config", "/tmp/craudinei-mcp.json",
+		"--max-turns", fmt.Sprintf("%d", m.cfg.Claude.MaxTurns),
+		"--max-budget-usd", fmt.Sprintf("%f", m.cfg.Claude.MaxBudgetUSD),
+		"--add-dir", workDir,
+	)
+
+	cmd := exec.Command(m.cfg.Claude.Binary, args...)
+	cmd.Dir = workDir
+	cmd.Env = os.Environ()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		if transitionErr := m.sm.Transition(types.StatusCrashed); transitionErr != nil {
+			m.logger.Error("manager: failed to transition to crashed after stdin pipe failure", "error", transitionErr)
+		}
+		if transitionErr := m.sm.Transition(types.StatusIdle); transitionErr != nil {
+			m.logger.Error("manager: failed to transition to idle after stdin pipe failure", "error", transitionErr)
+		}
+		return fmt.Errorf("manager: creating stdin pipe: %w", err)
+	}
+	m.stdin = stdinPipe
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		if transitionErr := m.sm.Transition(types.StatusCrashed); transitionErr != nil {
+			m.logger.Error("manager: failed to transition to crashed after stdout pipe failure", "error", transitionErr)
+		}
+		if transitionErr := m.sm.Transition(types.StatusIdle); transitionErr != nil {
+			m.logger.Error("manager: failed to transition to idle after stdout pipe failure", "error", transitionErr)
+		}
+		return fmt.Errorf("manager: creating stdout pipe: %w", err)
+	}
+	m.stdout = stdoutPipe
+
+	cmd.Stderr = &slogWriter{m.logger}
+
+	if err := cmd.Start(); err != nil {
+		if transitionErr := m.sm.Transition(types.StatusCrashed); transitionErr != nil {
+			m.logger.Error("manager: failed to transition to crashed after start failure", "error", transitionErr)
+		}
+		if transitionErr := m.sm.Transition(types.StatusIdle); transitionErr != nil {
+			m.logger.Error("manager: failed to transition to idle after start failure", "error", transitionErr)
+		}
+		return fmt.Errorf("manager: starting subprocess: %w", err)
+	}
+
+	m.cmd = cmd
+	m.pid = cmd.Process.Pid
+	m.pgid = cmd.Process.Pid
+
+	if err := m.writePIDFile(m.pid); err != nil {
+		m.logger.Error("manager: failed to write PID file", "error", err)
+	}
+
+	// Create derived context for goroutines and start pipe management
+	m.readyCh = make(chan struct{})
+	m.stopping.Store(false)
+	goroutineCtx, cancel := context.WithCancel(ctx)
+	m.cancel = cancel
+	m.startStdinWriter(goroutineCtx)
+	m.startStdoutReader(goroutineCtx)
+
+	// SaveSession() is called by the event handler after the init event sets
+	// the session ID. For Resume(), the session ID is already set (loaded from
+	// the session file), but we still defer saving to ensure atomicity.
+
 	return nil
 }
 

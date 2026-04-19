@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -759,5 +760,341 @@ func TestPipeManagement_StopCleansUp(t *testing.T) {
 	}
 	if m.PID() != 0 {
 		t.Error("PID should be 0 after Stop")
+	}
+}
+
+func TestSaveSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockBin := filepath.Join(tmpDir, "mock_claude.sh")
+	copyFile(t, "mock_claude.sh", mockBin)
+	os.Chmod(mockBin, 0755)
+
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{
+			Binary:       mockBin,
+			AllowedPaths: []string{tmpDir},
+			MaxTurns:     50,
+			MaxBudgetUSD: 5.0,
+		},
+	}
+	sm := NewStateMachine(types.StatusIdle)
+	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
+
+	m := NewManager(cfg, sm, queue, r, slog.Default())
+	m.pidFilePath = filepath.Join(tmpDir, "test.pid")
+	m.sessionFilePath = filepath.Join(tmpDir, "session.json")
+
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+
+	ctx := context.Background()
+	if err := m.Start(ctx, tmpDir); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Wait for the init event to set session ID
+	time.Sleep(100 * time.Millisecond)
+
+	// Manually set session data since the mock doesn't send real init
+	m.sm.state.StartSession(tmpDir)
+	if err := m.UpdateSessionID("test-session-abc123"); err != nil {
+		t.Fatalf("UpdateSessionID() failed: %v", err)
+	}
+
+	if err := m.SaveSession(); err != nil {
+		t.Fatalf("SaveSession() failed: %v", err)
+	}
+
+	// Verify session file contents
+	data, err := os.ReadFile(m.sessionFilePath)
+	if err != nil {
+		t.Fatalf("reading session file: %v", err)
+	}
+
+	var sessionData SessionData
+	if err := json.Unmarshal(data, &sessionData); err != nil {
+		t.Fatalf("unmarshalling session data: %v", err)
+	}
+
+	if sessionData.SessionID != "test-session-abc123" {
+		t.Errorf("SessionID = %q, want test-session-abc123", sessionData.SessionID)
+	}
+	if sessionData.WorkDir != tmpDir {
+		t.Errorf("WorkDir = %q, want %q", sessionData.WorkDir, tmpDir)
+	}
+	if sessionData.PID != m.PID() {
+		t.Errorf("PID = %d, want %d", sessionData.PID, m.PID())
+	}
+	if sessionData.StartedAt.IsZero() {
+		t.Error("StartedAt should not be zero")
+	}
+
+	m.Stop(ctx)
+}
+
+func TestLoadSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionFile := filepath.Join(tmpDir, "session.json")
+
+	// Write a session file
+	startedAt := time.Now().Truncate(time.Second)
+	sessionData := SessionData{
+		SessionID: "loaded-session-xyz",
+		WorkDir:   tmpDir,
+		PID:       12345,
+		StartedAt: startedAt,
+	}
+	data, err := json.Marshal(sessionData)
+	if err != nil {
+		t.Fatalf("marshalling session data: %v", err)
+	}
+	if err := os.WriteFile(sessionFile, data, 0644); err != nil {
+		t.Fatalf("writing session file: %v", err)
+	}
+
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{
+			Binary:       "/bin/ls",
+			AllowedPaths: []string{tmpDir},
+		},
+	}
+	sm := NewStateMachine(types.StatusIdle)
+	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
+
+	m := NewManager(cfg, sm, queue, r, slog.Default())
+	m.sessionFilePath = sessionFile
+
+	loaded, err := m.LoadSession()
+	if err != nil {
+		t.Fatalf("LoadSession() failed: %v", err)
+	}
+
+	if loaded.SessionID != "loaded-session-xyz" {
+		t.Errorf("SessionID = %q, want loaded-session-xyz", loaded.SessionID)
+	}
+	if loaded.WorkDir != tmpDir {
+		t.Errorf("WorkDir = %q, want %q", loaded.WorkDir, tmpDir)
+	}
+	if loaded.PID != 12345 {
+		t.Errorf("PID = %d, want 12345", loaded.PID)
+	}
+	if !loaded.StartedAt.Equal(startedAt) {
+		t.Errorf("StartedAt = %v, want %v", loaded.StartedAt, startedAt)
+	}
+}
+
+func TestLoadSession_NotFound(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	sessionFile := filepath.Join(tmpDir, "nonexistent.json")
+
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{
+			Binary:       "/bin/ls",
+			AllowedPaths: []string{tmpDir},
+		},
+	}
+	sm := NewStateMachine(types.StatusIdle)
+	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
+
+	m := NewManager(cfg, sm, queue, r, slog.Default())
+	m.sessionFilePath = sessionFile
+
+	_, err := m.LoadSession()
+	if err == nil {
+		t.Fatal("LoadSession() expected error for nonexistent file, got nil")
+	}
+	if !os.IsNotExist(err) {
+		t.Errorf("error = %v, want os.ErrNotExist", err)
+	}
+}
+
+func TestRemoveSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionFile := filepath.Join(tmpDir, "session.json")
+
+	// Write a session file first
+	sessionData := SessionData{
+		SessionID: "to-be-removed",
+		WorkDir:   tmpDir,
+		PID:       99999,
+		StartedAt: time.Now(),
+	}
+	data, err := json.Marshal(sessionData)
+	if err != nil {
+		t.Fatalf("marshalling session data: %v", err)
+	}
+	if err := os.WriteFile(sessionFile, data, 0644); err != nil {
+		t.Fatalf("writing session file: %v", err)
+	}
+
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{
+			Binary:       "/bin/ls",
+			AllowedPaths: []string{tmpDir},
+		},
+	}
+	sm := NewStateMachine(types.StatusIdle)
+	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
+
+	m := NewManager(cfg, sm, queue, r, slog.Default())
+	m.sessionFilePath = sessionFile
+
+	if err := m.RemoveSession(); err != nil {
+		t.Fatalf("RemoveSession() failed: %v", err)
+	}
+
+	// Verify file is gone
+	if _, err := os.Stat(sessionFile); !os.IsNotExist(err) {
+		t.Error("session file should be removed")
+	}
+}
+
+func TestResume(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockBin := filepath.Join(tmpDir, "mock_claude.sh")
+	copyFile(t, "mock_claude.sh", mockBin)
+	os.Chmod(mockBin, 0755)
+
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{
+			Binary:       mockBin,
+			AllowedPaths: []string{tmpDir},
+			MaxTurns:     50,
+			MaxBudgetUSD: 5.0,
+		},
+	}
+	sm := NewStateMachine(types.StatusIdle)
+	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
+
+	m := NewManager(cfg, sm, queue, r, slog.Default())
+	m.pidFilePath = filepath.Join(tmpDir, "resume.pid")
+	m.sessionFilePath = filepath.Join(tmpDir, "session.json")
+
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+
+	ctx := context.Background()
+
+	// Start initial session
+	if err := m.Start(ctx, tmpDir); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Set session ID via state machine
+	m.sm.state.StartSession(tmpDir)
+	m.sm.state.SetSessionID("resume-test-session-001")
+
+	// Save session
+	if err := m.SaveSession(); err != nil {
+		t.Fatalf("SaveSession() failed: %v", err)
+	}
+
+	// Stop the session
+	if err := m.Stop(ctx); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
+	}
+
+	// Resume with the session ID
+	if err := m.Resume(ctx, "resume-test-session-001"); err != nil {
+		t.Fatalf("Resume() failed: %v", err)
+	}
+
+	// Verify manager is running
+	if !m.IsRunning() {
+		t.Error("IsRunning should be true after Resume")
+	}
+	if m.PID() == 0 {
+		t.Error("PID should not be 0 after Resume")
+	}
+
+	// Verify session file was updated with new PID
+	loaded, err := m.LoadSession()
+	if err != nil {
+		t.Fatalf("LoadSession() failed: %v", err)
+	}
+	if loaded.SessionID != "resume-test-session-001" {
+		t.Errorf("SessionID = %q, want resume-test-session-001", loaded.SessionID)
+	}
+
+	m.Stop(ctx)
+}
+
+func TestResume_SessionNotFound(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{
+			Binary:       "/bin/ls",
+			AllowedPaths: []string{tmpDir},
+		},
+	}
+	sm := NewStateMachine(types.StatusIdle)
+	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
+
+	m := NewManager(cfg, sm, queue, r, slog.Default())
+	m.sessionFilePath = filepath.Join(tmpDir, "nonexistent.json")
+
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+
+	ctx := context.Background()
+	err := m.Resume(ctx, "nonexistent-session")
+	if err == nil {
+		t.Fatal("Resume() expected error for nonexistent session, got nil")
+	}
+}
+
+func TestSaveSession_CreatesDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionFile := filepath.Join(tmpDir, ".craudinei", "session.json")
+
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{
+			Binary:       "/bin/ls",
+			AllowedPaths: []string{tmpDir},
+		},
+	}
+	sm := NewStateMachine(types.StatusIdle)
+	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
+
+	m := NewManager(cfg, sm, queue, r, slog.Default())
+	m.sessionFilePath = sessionFile
+
+	// Set session data
+	m.sm.state.StartSession(tmpDir)
+	m.sm.state.SetSessionID("dir-test-session")
+
+	// Save should create the directory
+	if err := m.SaveSession(); err != nil {
+		t.Fatalf("SaveSession() failed: %v", err)
+	}
+
+	// Verify directory and file exist
+	info, err := os.Stat(filepath.Dir(sessionFile))
+	if err != nil {
+		t.Fatalf("stat session directory: %v", err)
+	}
+	if !info.IsDir() {
+		t.Error("session directory should be a directory")
+	}
+
+	data, err := os.ReadFile(sessionFile)
+	if err != nil {
+		t.Fatalf("reading session file: %v", err)
+	}
+
+	var sessionData SessionData
+	if err := json.Unmarshal(data, &sessionData); err != nil {
+		t.Fatalf("unmarshalling session data: %v", err)
+	}
+
+	if sessionData.SessionID != "dir-test-session" {
+		t.Errorf("SessionID = %q, want dir-test-session", sessionData.SessionID)
 	}
 }
