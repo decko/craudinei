@@ -2,17 +2,21 @@
 package claude
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/decko/craudinei/internal/config"
+	"github.com/decko/craudinei/internal/router"
 	"github.com/decko/craudinei/internal/types"
 
 	"log/slog"
@@ -24,6 +28,7 @@ type Manager struct {
 	cfg         *config.Config
 	sm          *StateMachine
 	queue       *InputQueue
+	router      *router.Router
 	logger      *slog.Logger
 	cmd         *exec.Cmd
 	pid         int
@@ -31,17 +36,23 @@ type Manager struct {
 	pidFilePath string
 	stdin       io.WriteCloser
 	stdout      io.Reader
+	wg          sync.WaitGroup
+	cancel      context.CancelFunc
+	readyCh     chan struct{}
+	stopping    atomic.Bool
 }
 
 // NewManager creates a new Manager with the given configuration, state machine,
-// input queue, and logger.
-func NewManager(cfg *config.Config, sm *StateMachine, queue *InputQueue, logger *slog.Logger) *Manager {
+// input queue, router, and logger.
+func NewManager(cfg *config.Config, sm *StateMachine, queue *InputQueue, router *router.Router, logger *slog.Logger) *Manager {
 	return &Manager{
 		cfg:         cfg,
 		sm:          sm,
 		queue:       queue,
+		router:      router,
 		logger:      logger,
 		pidFilePath: "/tmp/craudinei.pid",
+		readyCh:     make(chan struct{}),
 	}
 }
 
@@ -140,6 +151,15 @@ func (m *Manager) Start(ctx context.Context, workDir string) error {
 		m.logger.Error("manager: failed to write PID file", "error", err)
 	}
 
+	// Create derived context for goroutines and start pipe management
+	// Re-initialize readyCh in case Start is called again after Stop
+	m.readyCh = make(chan struct{})
+	m.stopping.Store(false)
+	goroutineCtx, cancel := context.WithCancel(ctx)
+	m.cancel = cancel
+	m.startStdinWriter(goroutineCtx)
+	m.startStdoutReader(goroutineCtx)
+
 	return nil
 }
 
@@ -147,6 +167,9 @@ func (m *Manager) Start(ctx context.Context, workDir string) error {
 // group, waiting up to 5 seconds, then sending SIGKILL if necessary. It then
 // reaps the process and transitions the state machine to idle.
 func (m *Manager) Stop(ctx context.Context) error {
+	if !m.stopping.CompareAndSwap(false, true) {
+		return fmt.Errorf("manager: stop already in progress")
+	}
 	m.mu.Lock()
 	if m.cmd == nil || m.cmd.Process == nil {
 		m.mu.Unlock()
@@ -156,21 +179,45 @@ func (m *Manager) Stop(ctx context.Context) error {
 	cmd := m.cmd
 	m.mu.Unlock()
 
+	// Signal goroutines to stop before sending signals to the process
+	if m.cancel != nil {
+		m.cancel()
+	}
+
+	// Close stdin to signal EOF to subprocess and unblock stdin writer
+	m.mu.Lock()
+	if m.stdin != nil {
+		_ = m.stdin.Close()
+		m.stdin = nil
+	}
+	m.mu.Unlock()
+
 	// Determine the appropriate transition based on current state.
 	currentStatus := m.sm.Status()
 
+	// Note: The signal sent depends on the current state machine status.
+	// When status is StatusStarting, SIGKILL is sent immediately because
+	// the process has not yet completed initialization. The transition from
+	// StatusStarting to StatusRunning is performed by the event handler
+	// upon receiving the init event from the subprocess. If this transition
+	// is delayed, Stop() will use SIGKILL instead of the graceful SIGINT.
 	switch currentStatus {
 	case types.StatusStarting:
 		// Process in startup phase - kill directly
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		cmd.Wait()
-		// Must transition starting → crashed → idle
-		if err := m.sm.Transition(types.StatusCrashed); err != nil {
-			return fmt.Errorf("manager: transitioning to crashed: %w", err)
-		}
 	case types.StatusRunning, types.StatusWaitingApproval:
 		// Normal case: graceful shutdown via SIGINT, then SIGKILL if needed
 		_ = syscall.Kill(-pgid, syscall.SIGINT)
+	default:
+		// For any other state, just ensure process is dead
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	}
+
+	// Wait for our goroutines to finish (they should finish now that pipes are closed)
+	m.wg.Wait()
+
+	// Reap the process - for running/waiting_approval we wait with timeout
+	if currentStatus == types.StatusRunning || currentStatus == types.StatusWaitingApproval {
 		done := make(chan struct{})
 		go func() {
 			_ = cmd.Wait()
@@ -188,25 +235,33 @@ func (m *Manager) Stop(ctx context.Context) error {
 		if err := m.sm.Transition(types.StatusStopping); err != nil {
 			return fmt.Errorf("manager: transitioning to stopping: %w", err)
 		}
-	default:
-		// For any other state, just ensure process is dead
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		cmd.Wait()
+	} else {
+		// For starting and default, just reap the process directly
+		_ = cmd.Wait()
+		if currentStatus == types.StatusStarting {
+			if err := m.sm.Transition(types.StatusCrashed); err != nil {
+				return fmt.Errorf("manager: transitioning to crashed: %w", err)
+			}
+		}
 	}
 
 	// Clean up PID file
 	_ = m.removePIDFile()
 
 	m.mu.Lock()
-	m.cmd = nil
-	m.pid = 0
-	m.pgid = 0
+	m.stdout = nil
 	m.mu.Unlock()
 
 	// Transition to idle (from crashed or stopping)
 	if err := m.sm.Transition(types.StatusIdle); err != nil {
 		return fmt.Errorf("manager: transitioning to idle: %w", err)
 	}
+
+	m.mu.Lock()
+	m.cmd = nil
+	m.pid = 0
+	m.pgid = 0
+	m.mu.Unlock()
 
 	return nil
 }
@@ -261,6 +316,142 @@ func (m *Manager) IsRunning() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.cmd != nil && m.cmd.Process != nil
+}
+
+// Stdin returns the stdin pipe writer for direct writes (e.g., approval responses).
+// Returns nil if no subprocess is running.
+func (m *Manager) Stdin() io.WriteCloser {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.stdin
+}
+
+// WaitReady blocks until the stdout reader goroutine has started or the context is cancelled.
+func (m *Manager) WaitReady(ctx context.Context) error {
+	select {
+	case <-m.readyCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// startStdinWriter starts a goroutine that drains the input queue and writes
+// messages to the subprocess stdin.
+func (m *Manager) startStdinWriter(ctx context.Context) {
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		for {
+			msg, err := m.queue.Dequeue(ctx)
+			if err != nil {
+				// Context cancelled or queue closed
+				if ctx.Err() != nil {
+					return
+				}
+				// Queue was closed
+				m.mu.Lock()
+				if m.stdin != nil {
+					_ = m.stdin.Close()
+				}
+				m.mu.Unlock()
+				return
+			}
+
+			data, err := json.Marshal(msg)
+			if err != nil {
+				m.logger.Error("manager: marshalling message for stdin", "error", err)
+				continue
+			}
+
+			m.mu.Lock()
+			stdin := m.stdin
+			m.mu.Unlock()
+
+			if stdin == nil {
+				return
+			}
+
+			if _, err := stdin.Write(data); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				m.logger.Error("manager: writing to stdin", "error", err)
+				m.mu.Lock()
+				if m.sm.Status() != types.StatusCrashed {
+					if transitionErr := m.sm.Transition(types.StatusCrashed); transitionErr != nil {
+						m.logger.Error("manager: failed to transition to crashed", "error", transitionErr)
+					}
+				}
+				m.mu.Unlock()
+				return
+			}
+
+			if _, err := stdin.Write([]byte("\n")); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				m.logger.Error("manager: writing newline to stdin", "error", err)
+				m.mu.Lock()
+				if m.sm.Status() != types.StatusCrashed {
+					if transitionErr := m.sm.Transition(types.StatusCrashed); transitionErr != nil {
+						m.logger.Error("manager: failed to transition to crashed", "error", transitionErr)
+					}
+				}
+				m.mu.Unlock()
+				return
+			}
+		}
+	}()
+}
+
+// startStdoutReader starts a goroutine that reads from stdout and feeds
+// lines to the router.
+func (m *Manager) startStdoutReader(ctx context.Context) {
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+
+		scanner := bufio.NewScanner(m.stdout)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+		// Close readyCh immediately after scanner is created so WaitReady() returns
+		// as soon as the goroutine is running and ready to scan.
+		close(m.readyCh)
+
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if len(line) == 0 {
+				continue
+			}
+
+			if err := m.router.Feed(line); err != nil {
+				m.logger.Error("manager: feeding line to router", "error", err)
+			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			m.logger.Error("manager: stdout scanner error", "error", err)
+		}
+
+		// Check if this was unexpected EOF (process crashed)
+		select {
+		case <-ctx.Done():
+			// Context was cancelled - graceful shutdown, expected
+		default:
+			// Context not cancelled - process exited unexpectedly
+			m.logger.Error("manager: subprocess exited unexpectedly")
+			m.mu.Lock()
+			if m.sm.Status() != types.StatusCrashed {
+				if transitionErr := m.sm.Transition(types.StatusCrashed); transitionErr != nil {
+					m.logger.Error("manager: failed to transition to crashed", "error", transitionErr)
+				}
+			}
+			// Close the input queue so Enqueue returns ErrQueueClosed
+			m.queue.Close()
+			m.mu.Unlock()
+		}
+	}()
 }
 
 // writePIDFile writes the given PID to the PID file.

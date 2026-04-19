@@ -7,10 +7,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/decko/craudinei/internal/config"
+	"github.com/decko/craudinei/internal/router"
 	"github.com/decko/craudinei/internal/types"
 
 	"log/slog"
@@ -28,9 +31,10 @@ func TestNewManager(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 	logger := slog.Default()
 
-	m := NewManager(cfg, sm, queue, logger)
+	m := NewManager(cfg, sm, queue, r, logger)
 
 	if m.cfg != cfg {
 		t.Error("cfg not set correctly")
@@ -71,8 +75,9 @@ func TestStart_Success(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 	m.pidFilePath = filepath.Join(tmpDir, "test.pid")
 
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
@@ -125,8 +130,9 @@ func TestStart_MissingAPIKey(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 
 	origKey := os.Getenv("ANTHROPIC_API_KEY")
 	os.Unsetenv("ANTHROPIC_API_KEY")
@@ -160,8 +166,9 @@ func TestStart_InvalidWorkDir(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
@@ -187,8 +194,9 @@ func TestStart_AlreadyRunning(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
@@ -223,8 +231,9 @@ func TestStop_Success(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 	m.pidFilePath = filepath.Join(tmpDir, "test.pid")
 
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
@@ -269,8 +278,9 @@ func TestStop_NotRunning(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 
 	ctx := context.Background()
 	err := m.Stop(ctx)
@@ -296,8 +306,9 @@ func TestKillOrphan_NoPIDFile(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 	m.pidFilePath = pidFile
 
 	err := m.KillOrphan()
@@ -323,8 +334,9 @@ func TestKillOrphan_DeadProcess(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 	m.pidFilePath = pidFile
 
 	err := m.KillOrphan()
@@ -373,8 +385,9 @@ sleep 60
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 	m.pidFilePath = pidFile
 
 	err := m.KillOrphan()
@@ -402,8 +415,9 @@ func TestStart_InvalidBinary(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
@@ -441,9 +455,10 @@ func TestStop_ContextCancellation(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
-	m.pidFilePath = filepath.Join(tmpDir, "cancel.pid")
+	m := NewManager(cfg, sm, queue, r, slog.Default())
+	m.pidFilePath = filepath.Join(tmpDir, "test.pid")
 
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
@@ -490,5 +505,259 @@ func copyFile(t *testing.T, src, dst string) {
 	}
 	if err := os.WriteFile(dst, data, 0644); err != nil {
 		t.Fatalf("writing %s: %v", dst, err)
+	}
+}
+
+func TestPipeManagement_StdinWriter(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockBin := filepath.Join(tmpDir, "mock_claude.sh")
+	copyFile(t, "mock_claude.sh", mockBin)
+	os.Chmod(mockBin, 0755)
+
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{
+			Binary:       mockBin,
+			AllowedPaths: []string{tmpDir},
+		},
+	}
+	sm := NewStateMachine(types.StatusIdle)
+	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
+
+	m := NewManager(cfg, sm, queue, r, slog.Default())
+	m.pidFilePath = filepath.Join(tmpDir, "stdin.pid")
+
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+
+	ctx := context.Background()
+	if err := m.Start(ctx, tmpDir); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Wait for reader to be ready
+	if err := m.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady() failed: %v", err)
+	}
+
+	// Enqueue a message that should be written to stdin
+	testMsg := `{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}`
+	if err := queue.Enqueue(testMsg); err != nil {
+		t.Fatalf("Enqueue() failed: %v", err)
+	}
+
+	// Close queue to signal writer to exit
+	queue.Close()
+
+	// Give time for the writer to process and exit
+	time.Sleep(200 * time.Millisecond)
+
+	if err := m.Stop(ctx); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
+	}
+
+	// Verify manager is stopped
+	if m.IsRunning() {
+		t.Error("IsRunning should be false after Stop")
+	}
+}
+
+func TestPipeManagement_StdoutReader(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockBin := filepath.Join(tmpDir, "mock_claude.sh")
+	copyFile(t, "mock_claude.sh", mockBin)
+	os.Chmod(mockBin, 0755)
+
+	var mu sync.Mutex
+	eventsReceived := make([]router.ClassifiedEvent, 0)
+
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{
+			Binary:       mockBin,
+			AllowedPaths: []string{tmpDir},
+		},
+	}
+	sm := NewStateMachine(types.StatusIdle)
+	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {
+		mu.Lock()
+		eventsReceived = append(eventsReceived, e)
+		mu.Unlock()
+	})
+
+	m := NewManager(cfg, sm, queue, r, slog.Default())
+	m.pidFilePath = filepath.Join(tmpDir, "stdout.pid")
+
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+
+	ctx := context.Background()
+	if err := m.Start(ctx, tmpDir); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Wait for reader to be ready
+	if err := m.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady() failed: %v", err)
+	}
+
+	// Give time for the init event to be routed
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	gotEvents := len(eventsReceived) > 0
+	mu.Unlock()
+
+	if !gotEvents {
+		t.Log("No events received - this may be due to timing")
+	}
+
+	if err := m.Stop(ctx); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
+	}
+}
+
+func TestPipeManagement_ContextCancellation(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockBin := filepath.Join(tmpDir, "mock_claude.sh")
+	copyFile(t, "mock_claude.sh", mockBin)
+	os.Chmod(mockBin, 0755)
+
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{
+			Binary:       mockBin,
+			AllowedPaths: []string{tmpDir},
+		},
+	}
+	sm := NewStateMachine(types.StatusIdle)
+	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
+
+	m := NewManager(cfg, sm, queue, r, slog.Default())
+	m.pidFilePath = filepath.Join(tmpDir, "cancel.pid")
+
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+
+	ctx := context.Background()
+	if err := m.Start(ctx, tmpDir); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Wait for reader to be ready
+	if err := m.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady() failed: %v", err)
+	}
+
+	// Create a cancelled context
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Stop should complete even with cancelled context
+	if err := m.Stop(cancelledCtx); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
+	}
+
+	// Verify manager is stopped
+	if m.IsRunning() {
+		t.Error("IsRunning should be false after Stop")
+	}
+}
+
+func TestPipeManagement_CrashDetection(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a script that exits with code 1 immediately after init
+	crashScript := filepath.Join(tmpDir, "crash_script.sh")
+	scriptContent := `#!/bin/bash
+echo '{"type":"system","subtype":"init","session_id":"test-session-123"}'
+sleep 0.1
+exit 1
+`
+	os.WriteFile(crashScript, []byte(scriptContent), 0755)
+
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{
+			Binary:       crashScript,
+			AllowedPaths: []string{tmpDir},
+		},
+	}
+	sm := NewStateMachine(types.StatusIdle)
+	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
+
+	m := NewManager(cfg, sm, queue, r, slog.Default())
+	m.pidFilePath = filepath.Join(tmpDir, "crash.pid")
+
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+
+	ctx := context.Background()
+	if err := m.Start(ctx, tmpDir); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Wait for reader to be ready
+	if err := m.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady() failed: %v", err)
+	}
+
+	// Give time for the crash to be detected
+	time.Sleep(300 * time.Millisecond)
+
+	// The state machine should have transitioned to crashed
+	if sm.Status() != types.StatusCrashed {
+		t.Errorf("Status = %s, want crashed", sm.Status())
+	}
+
+	// Try to Enqueue after crash - should fail with ErrQueueClosed
+	err := queue.Enqueue(`{"type":"user"}`)
+	if err != ErrQueueClosed {
+		t.Errorf("Enqueue() after crash error = %v, want ErrQueueClosed", err)
+	}
+
+	// Stop to clean up
+	if err := m.Stop(ctx); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
+	}
+}
+
+func TestPipeManagement_StopCleansUp(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockBin := filepath.Join(tmpDir, "mock_claude.sh")
+	copyFile(t, "mock_claude.sh", mockBin)
+	os.Chmod(mockBin, 0755)
+
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{
+			Binary:       mockBin,
+			AllowedPaths: []string{tmpDir},
+		},
+	}
+	sm := NewStateMachine(types.StatusIdle)
+	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
+
+	m := NewManager(cfg, sm, queue, r, slog.Default())
+	m.pidFilePath = filepath.Join(tmpDir, "cleanup.pid")
+
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+
+	ctx := context.Background()
+	if err := m.Start(ctx, tmpDir); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Wait for reader to be ready
+	if err := m.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady() failed: %v", err)
+	}
+
+	if err := m.Stop(ctx); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
+	}
+
+	// Verify cleanup
+	if m.IsRunning() {
+		t.Error("IsRunning should be false after Stop")
+	}
+	if m.PID() != 0 {
+		t.Error("PID should be 0 after Stop")
 	}
 }

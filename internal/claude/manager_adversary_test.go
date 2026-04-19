@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/decko/craudinei/internal/config"
+	"github.com/decko/craudinei/internal/router"
 	"github.com/decko/craudinei/internal/types"
 
 	"log/slog"
@@ -27,8 +28,9 @@ func TestAdversary_Start_RaceCondition(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 	m.pidFilePath = filepath.Join(tmpDir, "race.pid")
 
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
@@ -73,8 +75,9 @@ func TestAdversary_Stop_RapidStopStart(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 	m.pidFilePath = filepath.Join(tmpDir, "rapid.pid")
 
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
@@ -116,8 +119,9 @@ exit 0
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 	m.pidFilePath = filepath.Join(tmpDir, "exit.pid")
 
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
@@ -155,8 +159,9 @@ func TestAdversary_PIDFile_CorruptContent(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 	m.pidFilePath = pidFile
 
 	// Should handle corrupt content gracefully
@@ -186,8 +191,9 @@ func TestAdversary_PIDFile_PermissionDenied(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 
 	// Try to set PID file path to a location we can't write to
 	m.pidFilePath = filepath.Join(readonlyDir, "noperm.pid")
