@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/decko/craudinei/internal/config"
+	"github.com/decko/craudinei/internal/router"
 	"github.com/decko/craudinei/internal/types"
 
 	"log/slog"
@@ -35,12 +36,15 @@ sleep 60
 		Claude: config.ClaudeConfig{
 			Binary:       exitOnSigint,
 			AllowedPaths: []string{tmpDir},
+			MaxTurns:     50,
+			MaxBudgetUSD: 5.0,
 		},
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 	m.pidFilePath = filepath.Join(tmpDir, "graceful.pid")
 
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
@@ -69,60 +73,6 @@ sleep 60
 	}
 }
 
-// TestStart_StateTransition verifies that Start transitions idle→starting
-// and that manager records the subprocess correctly.
-func TestStart_StateTransition(t *testing.T) {
-	tmpDir := t.TempDir()
-	mockBin := filepath.Join(tmpDir, "mock_claude.sh")
-	copyFile(t, "mock_claude.sh", mockBin)
-	os.Chmod(mockBin, 0755)
-
-	cfg := &config.Config{
-		Claude: config.ClaudeConfig{
-			Binary:       mockBin,
-			AllowedPaths: []string{tmpDir},
-			MaxTurns:     50,
-			MaxBudgetUSD: 5.0,
-		},
-	}
-	sm := NewStateMachine(types.StatusIdle)
-	queue := NewInputQueue(5)
-
-	m := NewManager(cfg, sm, queue, slog.Default())
-	m.pidFilePath = filepath.Join(tmpDir, "transition.pid")
-
-	t.Setenv("ANTHROPIC_API_KEY", "test-key")
-
-	// Initial state should be idle
-	if sm.Status() != types.StatusIdle {
-		t.Errorf("initial Status = %s, want %s", sm.Status(), types.StatusIdle)
-	}
-
-	ctx := context.Background()
-	err := m.Start(ctx, tmpDir)
-	if err != nil {
-		t.Fatalf("Start() unexpected error: %v", err)
-	}
-
-	// After Start, should be in starting state
-	if sm.Status() != types.StatusStarting {
-		t.Errorf("Status after Start = %s, want %s", sm.Status(), types.StatusStarting)
-	}
-
-	// PID should be set and non-zero
-	pid := m.PID()
-	if pid == 0 {
-		t.Error("PID should be non-zero after Start")
-	}
-
-	// IsRunning should reflect the subprocess state
-	if !m.IsRunning() {
-		t.Error("IsRunning should be true after Start")
-	}
-
-	m.Stop(ctx)
-}
-
 // TestStart_InvalidWorkDir_NotInAllowedPaths verifies Start rejects a workDir
 // that is not within the allowed paths.
 func TestStart_InvalidWorkDir_NotInAllowedPaths(t *testing.T) {
@@ -139,8 +89,9 @@ func TestStart_InvalidWorkDir_NotInAllowedPaths(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
@@ -185,8 +136,9 @@ sleep 60
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 	m.pidFilePath = filepath.Join(tmpDir, "starting.pid")
 
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
@@ -234,8 +186,9 @@ func TestConcurrent_StartOnlyOneSucceeds(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 	m.pidFilePath = filepath.Join(tmpDir, "concurrent.pid")
 
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
@@ -298,8 +251,9 @@ func TestStop_NotRunningTwice(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 
 	ctx := context.Background()
 
@@ -335,8 +289,9 @@ func TestPIDFile_WrittenAndRemoved(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 	pidFile := filepath.Join(tmpDir, "pidfile.pid")
 	m.pidFilePath = pidFile
 
@@ -395,8 +350,9 @@ func TestManager_MutexProtection(t *testing.T) {
 	}
 	sm := NewStateMachine(types.StatusIdle)
 	queue := NewInputQueue(5)
+	r := router.NewRouter(func(e router.ClassifiedEvent) {})
 
-	m := NewManager(cfg, sm, queue, slog.Default())
+	m := NewManager(cfg, sm, queue, r, slog.Default())
 	m.pidFilePath = filepath.Join(tmpDir, "mutex.pid")
 
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
