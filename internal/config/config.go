@@ -20,6 +20,7 @@ type TelegramConfig struct {
 	ApprovalTimeout   time.Duration `yaml:"approval_timeout"`
 	ProgressInterval  time.Duration `yaml:"progress_interval"`
 	InactivityTimeout time.Duration `yaml:"inactivity_timeout"`
+	BannerImage       string        `yaml:"banner_image"` // URL or file_id for welcome/home screen banner
 }
 
 // ClaudeConfig holds Claude Code subprocess configuration.

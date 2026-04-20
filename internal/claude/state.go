@@ -22,8 +22,8 @@ var validTransitions = map[types.SessionStatus][]types.SessionStatus{
 var allowedCommands = map[types.SessionStatus][]string{
 	types.StatusIdle:            {"/begin", "/resume", "/status", "/help", "/sessions"},
 	types.StatusStarting:        {"/status", "/help"},
-	types.StatusRunning:         {"/stop", "/cancel", "/status", "/help"},
-	types.StatusWaitingApproval: {"/stop", "/cancel", "/status", "/help"},
+	types.StatusRunning:         {"/stop", "/cancel", "/status", "/help", "prompt"},
+	types.StatusWaitingApproval: {"/stop", "/cancel", "/status", "/help", "prompt"},
 	types.StatusStopping:        {"/status", "/help"},
 	types.StatusCrashed:         {"/begin", "/resume", "/status", "/help", "/sessions"},
 }
@@ -80,6 +80,11 @@ func (sm *StateMachine) CommandGuard(command string) error {
 // Status returns the current session status.
 func (sm *StateMachine) Status() types.SessionStatus {
 	return sm.state.Status()
+}
+
+// SessionState returns the internal session state for use by the event loop.
+func (sm *StateMachine) SessionState() *types.SessionState {
+	return sm.state
 }
 
 // AllowedCommands returns the list of allowed commands for the current state.

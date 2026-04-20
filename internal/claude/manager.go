@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -70,8 +69,9 @@ func NewManager(cfg *config.Config, sm *StateMachine, queue *InputQueue, router 
 }
 
 // Start spawns the Claude Code subprocess with the given working directory.
-// It validates the work directory, checks for the API key, transitions the
-// state machine, and starts the subprocess with process group management.
+// It validates the work directory, checks for the API key, and starts the
+// subprocess with process group management. The caller is responsible for
+// state machine transitions.
 func (m *Manager) Start(ctx context.Context, workDir string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -88,15 +88,6 @@ func (m *Manager) Start(ctx context.Context, workDir string) error {
 		return fmt.Errorf("manager: ANTHROPIC_API_KEY environment variable is not set")
 	}
 
-	if err := m.sm.Transition(types.StatusStarting); err != nil {
-		return fmt.Errorf("manager: transitioning to starting: %w", err)
-	}
-
-	allowedTools := ""
-	if len(m.cfg.Claude.AllowedTools) > 0 {
-		allowedTools = strings.Join(m.cfg.Claude.AllowedTools, " ")
-	}
-
 	args := []string{
 		"-p",
 		"--input-format", "stream-json",
@@ -104,8 +95,8 @@ func (m *Manager) Start(ctx context.Context, workDir string) error {
 		"--verbose",
 		"--append-system-prompt", m.cfg.Claude.SystemPrompt,
 	}
-	if allowedTools != "" {
-		args = append(args, "--allowedTools", allowedTools)
+	for _, tool := range m.cfg.Claude.AllowedTools {
+		args = append(args, "--allowedTools", tool)
 	}
 	args = append(args,
 		"--permission-prompt-tool", "craudinei_approval",
@@ -122,24 +113,12 @@ func (m *Manager) Start(ctx context.Context, workDir string) error {
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
-		if transitionErr := m.sm.Transition(types.StatusCrashed); transitionErr != nil {
-			m.logger.Error("manager: failed to transition to crashed after stdin pipe failure", "error", transitionErr)
-		}
-		if transitionErr := m.sm.Transition(types.StatusIdle); transitionErr != nil {
-			m.logger.Error("manager: failed to transition to idle after stdin pipe failure", "error", transitionErr)
-		}
 		return fmt.Errorf("manager: creating stdin pipe: %w", err)
 	}
 	m.stdin = stdinPipe
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		if transitionErr := m.sm.Transition(types.StatusCrashed); transitionErr != nil {
-			m.logger.Error("manager: failed to transition to crashed after stdout pipe failure", "error", transitionErr)
-		}
-		if transitionErr := m.sm.Transition(types.StatusIdle); transitionErr != nil {
-			m.logger.Error("manager: failed to transition to idle after stdout pipe failure", "error", transitionErr)
-		}
 		return fmt.Errorf("manager: creating stdout pipe: %w", err)
 	}
 	m.stdout = stdoutPipe
@@ -147,12 +126,6 @@ func (m *Manager) Start(ctx context.Context, workDir string) error {
 	cmd.Stderr = &slogWriter{m.logger}
 
 	if err := cmd.Start(); err != nil {
-		if transitionErr := m.sm.Transition(types.StatusCrashed); transitionErr != nil {
-			m.logger.Error("manager: failed to transition to crashed after start failure", "error", transitionErr)
-		}
-		if transitionErr := m.sm.Transition(types.StatusIdle); transitionErr != nil {
-			m.logger.Error("manager: failed to transition to idle after start failure", "error", transitionErr)
-		}
 		return fmt.Errorf("manager: starting subprocess: %w", err)
 	}
 
@@ -182,7 +155,7 @@ func (m *Manager) Start(ctx context.Context, workDir string) error {
 
 // Stop gracefully shuts down the subprocess by sending SIGINT to the process
 // group, waiting up to 5 seconds, then sending SIGKILL if necessary. It then
-// reaps the process and transitions the state machine to idle.
+// reaps the process. The caller is responsible for state machine transitions.
 func (m *Manager) Stop(ctx context.Context) error {
 	if !m.stopping.CompareAndSwap(false, true) {
 		return fmt.Errorf("manager: stop already in progress")
@@ -209,15 +182,12 @@ func (m *Manager) Stop(ctx context.Context) error {
 	}
 	m.mu.Unlock()
 
-	// Determine the appropriate transition based on current state.
+	// Determine the appropriate signal based on current state.
 	currentStatus := m.sm.Status()
 
 	// Note: The signal sent depends on the current state machine status.
 	// When status is StatusStarting, SIGKILL is sent immediately because
-	// the process has not yet completed initialization. The transition from
-	// StatusStarting to StatusRunning is performed by the event handler
-	// upon receiving the init event from the subprocess. If this transition
-	// is delayed, Stop() will use SIGKILL instead of the graceful SIGINT.
+	// the process has not yet completed initialization.
 	switch currentStatus {
 	case types.StatusStarting:
 		// Process in startup phase - kill directly
@@ -249,17 +219,9 @@ func (m *Manager) Stop(ctx context.Context) error {
 			_ = syscall.Kill(-pgid, syscall.SIGKILL)
 			<-done
 		}
-		if err := m.sm.Transition(types.StatusStopping); err != nil {
-			return fmt.Errorf("manager: transitioning to stopping: %w", err)
-		}
 	} else {
 		// For starting and default, just reap the process directly
 		_ = cmd.Wait()
-		if currentStatus == types.StatusStarting {
-			if err := m.sm.Transition(types.StatusCrashed); err != nil {
-				return fmt.Errorf("manager: transitioning to crashed: %w", err)
-			}
-		}
 	}
 
 	// Clean up PID file
@@ -268,11 +230,6 @@ func (m *Manager) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	m.stdout = nil
 	m.mu.Unlock()
-
-	// Transition to idle (from crashed or stopping)
-	if err := m.sm.Transition(types.StatusIdle); err != nil {
-		return fmt.Errorf("manager: transitioning to idle: %w", err)
-	}
 
 	m.mu.Lock()
 	m.cmd = nil
@@ -339,6 +296,36 @@ func (m *Manager) IsRunning() bool {
 	return m.cmd != nil && m.cmd.Process != nil
 }
 
+// Status returns the current session status from the state machine.
+func (m *Manager) Status() types.SessionStatus {
+	return m.sm.Status()
+}
+
+// SessionID returns the current session ID from the state machine.
+func (m *Manager) SessionID() string {
+	return m.sm.state.SessionID()
+}
+
+// WorkDir returns the current working directory from the state machine.
+func (m *Manager) WorkDir() string {
+	return m.sm.state.WorkDir()
+}
+
+// AllowedCommands returns the list of allowed commands for the current state.
+func (m *Manager) AllowedCommands() []string {
+	return m.sm.AllowedCommands()
+}
+
+// CommandGuard validates whether the given command is allowed in the current state.
+func (m *Manager) CommandGuard(command string) error {
+	return m.sm.CommandGuard(command)
+}
+
+// Transition moves the state machine to the target status if valid.
+func (m *Manager) Transition(target types.SessionStatus) error {
+	return m.sm.Transition(target)
+}
+
 // Stdin returns the stdin pipe writer for direct writes (e.g., approval responses).
 // Returns nil if no subprocess is running.
 func (m *Manager) Stdin() io.WriteCloser {
@@ -379,9 +366,16 @@ func (m *Manager) startStdinWriter(ctx context.Context) {
 				return
 			}
 
-			data, err := json.Marshal(msg)
+			envelope := map[string]any{
+				"type": "user",
+				"message": map[string]any{
+					"role":    "user",
+					"content": msg,
+				},
+			}
+			data, err := json.Marshal(envelope)
 			if err != nil {
-				m.logger.Error("manager: marshalling message for stdin", "error", err)
+				m.logger.Error("manager: marshalling envelope for stdin", "error", err)
 				continue
 			}
 
@@ -583,7 +577,7 @@ func (m *Manager) RemoveSession() error {
 // Resume spawns a new subprocess with --resume <session_id> to continue
 // a previous session. It validates the session file exists, loads the
 // session ID and work directory, and starts the subprocess with the
-// --resume flag.
+// --resume flag. The caller is responsible for state machine transitions.
 func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -610,15 +604,6 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("manager: ANTHROPIC_API_KEY environment variable is not set")
 	}
 
-	if err := m.sm.Transition(types.StatusStarting); err != nil {
-		return fmt.Errorf("manager: transitioning to starting: %w", err)
-	}
-
-	allowedTools := ""
-	if len(m.cfg.Claude.AllowedTools) > 0 {
-		allowedTools = strings.Join(m.cfg.Claude.AllowedTools, " ")
-	}
-
 	args := []string{
 		"-p",
 		"--input-format", "stream-json",
@@ -627,8 +612,8 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 		"--append-system-prompt", m.cfg.Claude.SystemPrompt,
 		"--resume", sessionID,
 	}
-	if allowedTools != "" {
-		args = append(args, "--allowedTools", allowedTools)
+	for _, tool := range m.cfg.Claude.AllowedTools {
+		args = append(args, "--allowedTools", tool)
 	}
 	args = append(args,
 		"--permission-prompt-tool", "craudinei_approval",
@@ -645,24 +630,12 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
-		if transitionErr := m.sm.Transition(types.StatusCrashed); transitionErr != nil {
-			m.logger.Error("manager: failed to transition to crashed after stdin pipe failure", "error", transitionErr)
-		}
-		if transitionErr := m.sm.Transition(types.StatusIdle); transitionErr != nil {
-			m.logger.Error("manager: failed to transition to idle after stdin pipe failure", "error", transitionErr)
-		}
 		return fmt.Errorf("manager: creating stdin pipe: %w", err)
 	}
 	m.stdin = stdinPipe
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		if transitionErr := m.sm.Transition(types.StatusCrashed); transitionErr != nil {
-			m.logger.Error("manager: failed to transition to crashed after stdout pipe failure", "error", transitionErr)
-		}
-		if transitionErr := m.sm.Transition(types.StatusIdle); transitionErr != nil {
-			m.logger.Error("manager: failed to transition to idle after stdout pipe failure", "error", transitionErr)
-		}
 		return fmt.Errorf("manager: creating stdout pipe: %w", err)
 	}
 	m.stdout = stdoutPipe
@@ -670,12 +643,6 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	cmd.Stderr = &slogWriter{m.logger}
 
 	if err := cmd.Start(); err != nil {
-		if transitionErr := m.sm.Transition(types.StatusCrashed); transitionErr != nil {
-			m.logger.Error("manager: failed to transition to crashed after start failure", "error", transitionErr)
-		}
-		if transitionErr := m.sm.Transition(types.StatusIdle); transitionErr != nil {
-			m.logger.Error("manager: failed to transition to idle after start failure", "error", transitionErr)
-		}
 		return fmt.Errorf("manager: starting subprocess: %w", err)
 	}
 

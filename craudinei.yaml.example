@@ -57,6 +57,12 @@ telegram:
   # Default: 15m
   inactivity_timeout: 15m
 
+  # URL or Telegram file_id for the banner image shown on welcome and home screens.
+  # When empty, no banner is shown and sendMessage is used instead.
+  # Type: string
+  # Default: ""
+  # banner_image: "https://example.com/banner.png"
+
 claude:
   # Path to Claude Code binary (required, must be absolute path).
   # Relative paths are rejected at config validation for security.
