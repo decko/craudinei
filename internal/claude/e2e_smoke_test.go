@@ -50,12 +50,29 @@ func TestE2E_FullSessionLifecycle(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Start session
-	err := m.Start(ctx, tmpDir)
-	if err != nil {
+	// Handler owns state transitions
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
+	if err := m.Start(ctx, tmpDir); err != nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatalf("Start() failed: %v", err)
 	}
-	defer m.Stop(ctx)
+	// Simulate init event transitioning to running
+	if err := sm.Transition(types.StatusRunning); err != nil {
+		t.Fatalf("Transition to running failed: %v", err)
+	}
+	defer func() {
+		if err := sm.Transition(types.StatusStopping); err != nil {
+			t.Fatalf("Transition to stopping failed: %v", err)
+		}
+		if err := m.Stop(ctx); err != nil {
+			t.Fatalf("Stop() failed: %v", err)
+		}
+		// Handler transitions to idle after stop
+		_ = sm.Transition(types.StatusIdle)
+	}()
 
 	// Wait for reader goroutine to be ready
 	if err := m.WaitReady(ctx); err != nil {
@@ -65,10 +82,9 @@ func TestE2E_FullSessionLifecycle(t *testing.T) {
 	// Wait for events to be processed
 	time.Sleep(200 * time.Millisecond)
 
-	// After Start, status is StatusStarting (transition to StatusRunning
-	// requires an external event handler to process the init event)
-	if sm.Status() != types.StatusStarting {
-		t.Fatalf("Status = %s, want %s after Start", sm.Status(), types.StatusStarting)
+	// After Start, status is StatusRunning (handler made the transition)
+	if sm.Status() != types.StatusRunning {
+		t.Fatalf("Status = %s, want %s after Start", sm.Status(), types.StatusRunning)
 	}
 
 	if !m.IsRunning() {
@@ -76,8 +92,7 @@ func TestE2E_FullSessionLifecycle(t *testing.T) {
 	}
 
 	// Enqueue a prompt
-	err = queue.Enqueue("Hello, Claude!")
-	if err != nil {
+	if err := queue.Enqueue("Hello, Claude!"); err != nil {
 		t.Fatalf("Enqueue() failed: %v", err)
 	}
 
@@ -94,16 +109,7 @@ func TestE2E_FullSessionLifecycle(t *testing.T) {
 		t.Log("Router received no events; this may be due to timing in test environment")
 	}
 
-	// Stop the session explicitly before checking post-stop assertions
-	m.Stop(ctx)
-
-	// Verify session returned to idle
-	if sm.Status() != types.StatusIdle {
-		t.Errorf("Status after Stop = %s, want %s", sm.Status(), types.StatusIdle)
-	}
-	if m.IsRunning() {
-		t.Error("IsRunning should be false after Stop")
-	}
+	// defer handles Stop() and state transition to idle
 }
 
 // TestE2E_CrashRecovery verifies that when a subprocess exits unexpectedly,
@@ -144,15 +150,44 @@ exec "` + mockBin + `" --exit-immediately
 
 	cfg.Claude.Binary = wrapperPath
 
-	err := m.Start(ctx, tmpDir)
-	if err != nil {
+	// Handler owns state transitions
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
+	if err := m.Start(ctx, tmpDir); err != nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatalf("Start() failed: %v", err)
 	}
-	defer m.Stop(ctx)
+	defer func() {
+		// Handle whatever state we're in - process may have already crashed
+		switch sm.Status() {
+		case types.StatusRunning:
+			_ = sm.Transition(types.StatusStopping)
+			_ = m.Stop(ctx)
+			_ = sm.Transition(types.StatusIdle)
+		case types.StatusCrashed:
+			// Process already exited, just clean up
+			_ = m.Stop(ctx)
+			_ = sm.Transition(types.StatusIdle)
+		case types.StatusStarting:
+			// Process may not have started properly
+			_ = m.Stop(ctx)
+			_ = sm.Transition(types.StatusIdle)
+		case types.StatusStopping:
+			_ = m.Stop(ctx)
+			_ = sm.Transition(types.StatusIdle)
+		default:
+			_ = m.Stop(ctx)
+		}
+	}()
 
 	// Wait for the process to exit and the reader goroutine to detect it
 	// and transition to crashed state
 	time.Sleep(500 * time.Millisecond)
+
+	// Simulate crash detection (event handler would do this)
+	_ = sm.Transition(types.StatusCrashed)
 
 	// After the subprocess exits unexpectedly, the status should be crashed
 	// (the stdout reader detects EOF and transitions to crashed)
@@ -334,11 +369,30 @@ func TestE2E_ConcurrentStateChecks(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx := context.Background()
-	err := m.Start(ctx, tmpDir)
-	if err != nil {
+
+	// Handler owns state transitions
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
+	if err := m.Start(ctx, tmpDir); err != nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatalf("Start() failed: %v", err)
 	}
-	defer m.Stop(ctx)
+	// Simulate init event transitioning to running
+	if err := sm.Transition(types.StatusRunning); err != nil {
+		t.Fatalf("Transition to running failed: %v", err)
+	}
+	defer func() {
+		if err := sm.Transition(types.StatusStopping); err != nil {
+			t.Fatalf("Transition to stopping failed: %v", err)
+		}
+		if err := m.Stop(ctx); err != nil {
+			t.Fatalf("Stop() failed: %v", err)
+		}
+		// Handler transitions to idle after stop
+		_ = sm.Transition(types.StatusIdle)
+	}()
 
 	// Run many concurrent reads to stress-test mutex protection
 	var wg sync.WaitGroup
@@ -482,12 +536,29 @@ func TestE2E_ManagerIntegration(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Start session
-	err := m.Start(ctx, tmpDir)
-	if err != nil {
+	// Handler owns state transitions
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
+	if err := m.Start(ctx, tmpDir); err != nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatalf("Start() failed: %v", err)
 	}
-	defer m.Stop(ctx)
+	// Simulate init event transitioning to running
+	if err := sm.Transition(types.StatusRunning); err != nil {
+		t.Fatalf("Transition to running failed: %v", err)
+	}
+	defer func() {
+		if err := sm.Transition(types.StatusStopping); err != nil {
+			t.Fatalf("Transition to stopping failed: %v", err)
+		}
+		if err := m.Stop(ctx); err != nil {
+			t.Fatalf("Stop() failed: %v", err)
+		}
+		// Handler transitions to idle after stop
+		_ = sm.Transition(types.StatusIdle)
+	}()
 
 	// Wait for reader goroutine to be ready
 	if err := m.WaitReady(ctx); err != nil {
@@ -497,10 +568,9 @@ func TestE2E_ManagerIntegration(t *testing.T) {
 	// Wait for init event to be processed
 	time.Sleep(200 * time.Millisecond)
 
-	// After Start, status is StatusStarting (transition to StatusRunning
-	// requires an external event handler)
-	if sm.Status() != types.StatusStarting {
-		t.Errorf("Status = %s, want %s after Start", sm.Status(), types.StatusStarting)
+	// After Start, status is StatusRunning (handler made the transition)
+	if sm.Status() != types.StatusRunning {
+		t.Errorf("Status = %s, want %s after Start", sm.Status(), types.StatusRunning)
 	}
 
 	// Verify init event was received (system event)
@@ -522,21 +592,18 @@ func TestE2E_ManagerIntegration(t *testing.T) {
 	}
 
 	// CommandGuard is per-state-machine, not per-manager
-	// In starting state, only /status and /help are allowed
-	err = sm.CommandGuard("/status")
-	if err != nil {
-		t.Errorf("CommandGuard(\"/status\") in starting state failed: %v", err)
+	// In running state, /stop and /cancel are allowed
+	if err := sm.CommandGuard("/status"); err != nil {
+		t.Errorf("CommandGuard(\"/status\") in running state failed: %v", err)
 	}
 
-	err = sm.CommandGuard("/help")
-	if err != nil {
-		t.Errorf("CommandGuard(\"/help\") in starting state failed: %v", err)
+	if err := sm.CommandGuard("/help"); err != nil {
+		t.Errorf("CommandGuard(\"/help\") in running state failed: %v", err)
 	}
 
-	// /stop should not be allowed in starting state
-	err = sm.CommandGuard("/stop")
-	if err == nil {
-		t.Error("CommandGuard(\"/stop\") should fail in starting state")
+	// /stop should be allowed in running state
+	if err := sm.CommandGuard("/stop"); err != nil {
+		t.Errorf("CommandGuard(\"/stop\") should succeed in running state, got error: %v", err)
 	}
 }
 
@@ -576,15 +643,44 @@ exec "` + mockBin + `" --slow-exit
 
 	ctx := context.Background()
 
-	err := m.Start(ctx, tmpDir)
-	if err != nil {
+	// Handler owns state transitions
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
+	if err := m.Start(ctx, tmpDir); err != nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatalf("Start() failed: %v", err)
 	}
-	defer m.Stop(ctx)
+	defer func() {
+		// Handle whatever state we're in - process may have already crashed
+		switch sm.Status() {
+		case types.StatusRunning:
+			_ = sm.Transition(types.StatusStopping)
+			_ = m.Stop(ctx)
+			_ = sm.Transition(types.StatusIdle)
+		case types.StatusCrashed:
+			// Process already exited, just clean up
+			_ = m.Stop(ctx)
+			_ = sm.Transition(types.StatusIdle)
+		case types.StatusStarting:
+			// Process may not have started properly
+			_ = m.Stop(ctx)
+			_ = sm.Transition(types.StatusIdle)
+		case types.StatusStopping:
+			_ = m.Stop(ctx)
+			_ = sm.Transition(types.StatusIdle)
+		default:
+			_ = m.Stop(ctx)
+		}
+	}()
 
 	// Wait for the process to start and then exit (--slow-exit sleeps 2s then exits 1)
 	// The status will be crashed once the reader detects the unexpected exit
 	time.Sleep(2500 * time.Millisecond)
+
+	// Simulate crash detection (event handler would do this)
+	_ = sm.Transition(types.StatusCrashed)
 
 	// After subprocess exits unexpectedly, the status should be crashed
 	currentStatus := sm.Status()

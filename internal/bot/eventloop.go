@@ -196,14 +196,16 @@ func (el *EventLoop) handleResult(event router.ClassifiedEvent) {
 		return
 	}
 
-	// Check if we should send as file
+	// Check if we should send as file (file content is NOT HTML-escaped)
 	if ShouldSendAsFile(event.Text) {
 		el.sendAsFile(event.Text)
 		return
 	}
 
-	// Send result directly
-	chunks := ChunkMessages(event.Text)
+	// Escape HTML for inline display
+	escapedText := EscapeHTML(event.Text)
+
+	chunks := ChunkMessages(escapedText)
 	for _, chunk := range chunks {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_, _ = el.bot.SendPriority(ctx, el.chatID, chunk, "HTML", PriorityHigh)
@@ -294,29 +296,32 @@ func (el *EventLoop) flushBuffer() {
 		return
 	}
 
-	// Check if we should send as file
+	// Check if we should send as file (raw content, not HTML-escaped)
 	if ShouldSendAsFile(text) {
 		el.sendAsFile(text)
 		return
 	}
+
+	// Escape HTML for inline Telegram display
+	escapedText := EscapeHTML(text)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	// Use edit-based streaming if we have a lastMsgID and haven't exceeded MaxEditsBeforeNew
 	if editCount > 0 && editCount < el.cfg.MaxEditsBeforeNew && el.lastMsgID != 0 {
-		_, err := el.bot.SendEdit(ctx, el.chatID, el.lastMsgID, text, "HTML")
+		_, err := el.bot.SendEdit(ctx, el.chatID, el.lastMsgID, escapedText, "HTML")
 		if err != nil {
 			el.logger.Error("eventloop: editing message", "err", err)
 			// On error, try sending as new message
-			msg, err := el.bot.SendDirect(ctx, el.chatID, text, "HTML")
+			msg, err := el.bot.SendDirect(ctx, el.chatID, escapedText, "HTML")
 			if err == nil && msg != nil {
 				el.lastMsgID = int(msg.ID)
 			}
 		}
 	} else {
 		// Send as new message
-		chunks := ChunkMessages(text)
+		chunks := ChunkMessages(escapedText)
 		for _, chunk := range chunks {
 			msg, err := el.bot.SendDirect(ctx, el.chatID, chunk, "HTML")
 			if err != nil {
@@ -339,8 +344,8 @@ func (el *EventLoop) sendAsFile(text string) {
 
 	if _, err := el.bot.SendDocument(ctx, el.chatID, filename, text, caption); err != nil {
 		el.logger.Error("failed to send document", "err", err)
-		// Fallback: send as regular message chunks
-		chunks := ChunkMessages(text)
+		// Fallback: send as regular message chunks (escaped for HTML)
+		chunks := ChunkMessages(EscapeHTML(text))
 		for _, chunk := range chunks {
 			ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 			_, _ = el.bot.SendPriority(ctx2, el.chatID, chunk, "HTML", PriorityHigh)

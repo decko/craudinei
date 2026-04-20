@@ -1120,12 +1120,16 @@ func TestHandleTextMessage(t *testing.T) {
 				t.Error("expected prompt NOT to be enqueued")
 			}
 
-			// Check that the enqueued prompt was sanitized and JSON marshaled
+			// Check that the enqueued prompt was sanitized (raw string, not JSON marshaled)
 			if tc.wantSanitized && len(queue.enqueued) > 0 {
 				enqueued := queue.enqueued[0]
-				// JSON marshaled string should be quoted
-				if !strings.HasPrefix(enqueued, "\"") || !strings.HasSuffix(enqueued, "\"") {
-					t.Errorf("expected JSON marshaled string, got %q", enqueued)
+				// The enqueued string should be the raw sanitized text, not JSON-marshaled
+				// JSON marshaling would add quotes; we expect plain text
+				if strings.HasPrefix(enqueued, "\"") && strings.HasSuffix(enqueued, "\"") {
+					t.Errorf("expected raw sanitized string, got JSON marshaled: %q", enqueued)
+				}
+				if enqueued != tc.text {
+					t.Errorf("expected enqueued text %q, got %q", tc.text, enqueued)
 				}
 			}
 

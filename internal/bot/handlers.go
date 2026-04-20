@@ -2,7 +2,6 @@ package bot
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -557,18 +556,11 @@ func (h *Handlers) HandleTextMessage(ctx context.Context, api interface{}, updat
 		return
 	}
 
-	// FR-016: Input sanitization - strip control chars, cap at 4096, json.Marshal for stdin
+	// FR-016: Input sanitization - strip control chars, cap at 4096
 	sanitized := SanitizeInput(text)
 
-	// Build JSON for stdin as per FR-016
-	promptJSON, err := json.Marshal(sanitized)
-	if err != nil {
-		h.sendReply(ctx, chatID, "Failed to process prompt. Please try again.")
-		return
-	}
-
 	// Enqueue to input queue
-	if err := h.queue.Enqueue(string(promptJSON)); err != nil {
+	if err := h.queue.Enqueue(sanitized); err != nil {
 		h.sendReply(ctx, chatID, "Queue full. Please wait for Claude to finish.")
 		return
 	}

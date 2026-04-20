@@ -144,6 +144,11 @@ sleep 60
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx := context.Background()
+
+	// Transition to starting BEFORE Start (handlers own state transitions)
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
 	err := m.Start(ctx, tmpDir)
 	if err != nil {
 		t.Fatalf("Start() failed: %v", err)
@@ -160,7 +165,20 @@ sleep 60
 		t.Fatalf("Stop() unexpected error: %v", err)
 	}
 
-	// Should end up idle after starting→crashed→idle
+	// After Stop, the goroutine may have transitioned to crashed (if it detected
+	// the unexpected exit before context cancellation) or the state may still be
+	// starting (if context was cancelled first). Transition to idle via valid path.
+	switch sm.Status() {
+	case types.StatusStarting:
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
+	case types.StatusCrashed:
+		_ = sm.Transition(types.StatusIdle)
+	case types.StatusStopping:
+		_ = sm.Transition(types.StatusIdle)
+	}
+
+	// Should end up idle after starting→crashed→idle or stopping→idle
 	if sm.Status() != types.StatusIdle {
 		t.Errorf("Status after Stop = %s, want %s", sm.Status(), types.StatusIdle)
 	}

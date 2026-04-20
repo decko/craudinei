@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/decko/craudinei/internal/audit"
-	"github.com/decko/craudinei/internal/bot"
 )
 
 // ApprovalRequest represents a pending approval request awaiting user response.
@@ -29,9 +29,21 @@ type ApprovalResponse struct {
 	Reason   string
 }
 
+// InlineKeyboardButton represents a button in an inline keyboard.
+type InlineKeyboardButton struct {
+	Text         string
+	CallbackData string
+}
+
+// InlineKeyboardMarkup represents an inline keyboard markup for Telegram messages.
+type InlineKeyboardMarkup struct {
+	InlineKeyboard [][]InlineKeyboardButton
+}
+
 // BotSender defines the interface for sending messages via the bot.
 type BotSender interface {
 	Send(ctx context.Context, chatID int64, text string, parseMode string) (any, error)
+	SendWithKeyboard(ctx context.Context, chatID int64, text string, parseMode string, keyboard InlineKeyboardMarkup) (any, error)
 }
 
 // Handler manages approval requests and routes them to Telegram.
@@ -209,16 +221,30 @@ func (h *Handler) sendApprovalMessage(toolName string, toolInput json.RawMessage
 		}
 	}
 
+	// Truncate very long input for display
+	if len(inputPretty) > 500 {
+		inputPretty = inputPretty[:500] + "\n... (truncated)"
+	}
+
 	text := fmt.Sprintf(
-		"<b>Approval Required</b>\n\n<b>Tool:</b> %s\n<b>Input:</b>\n<pre>%s</pre>\n\nReact to approve/deny.",
-		bot.EscapeHTML(toolName),
-		bot.EscapeHTML(inputPretty),
+		"<b>⚠️ Approval Required</b>\n\n<b>Tool:</b> <code>%s</code>\n\n<b>Input:</b>\n<pre>%s</pre>",
+		escapeHTML(toolName),
+		escapeHTML(inputPretty),
 	)
+
+	keyboard := InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{
+			{
+				{Text: "✅ Approve", CallbackData: "a:" + id},
+				{Text: "❌ Deny", CallbackData: "d:" + id},
+			},
+		},
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	_, err := h.bot.Send(ctx, h.chatID, text, "HTML")
+	_, err := h.bot.SendWithKeyboard(ctx, h.chatID, text, "HTML", keyboard)
 	if err != nil {
 		h.logger.Error("approval: sending approval message", "err", err)
 	}
@@ -228,4 +254,25 @@ func (h *Handler) editTimeoutMessage(id string) {
 	// In a real implementation, we would edit the original message
 	// to show "(Timed out — auto-denied)". For now, we just log it.
 	h.logger.Info("approval: request timed out", "id", id)
+}
+
+// escapeHTML escapes characters that have special meaning in HTML.
+func escapeHTML(s string) string {
+	var builder strings.Builder
+	builder.Grow(len(s) + 32)
+	for _, r := range s {
+		switch r {
+		case '&':
+			builder.WriteString("&amp;")
+		case '<':
+			builder.WriteString("&lt;")
+		case '>':
+			builder.WriteString("&gt;")
+		case '"':
+			builder.WriteString("&quot;")
+		default:
+			builder.WriteRune(r)
+		}
+	}
+	return builder.String()
 }

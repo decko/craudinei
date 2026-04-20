@@ -245,6 +245,27 @@ func (b *Bot) SendDirect(ctx context.Context, chatID int64, text string, parseMo
 	return msg, nil
 }
 
+// SendWithKeyboard sends a message with an inline keyboard markup.
+// This bypasses the rate-limited queue for immediate delivery (approval cards are high-priority).
+func (b *Bot) SendWithKeyboard(ctx context.Context, chatID int64, text string, parseMode string, keyboard models.InlineKeyboardMarkup) (*models.Message, error) {
+	if b.api == nil {
+		return nil, fmt.Errorf("bot: api not initialized")
+	}
+	params := &bot.SendMessageParams{
+		ChatID:      chatID,
+		Text:        text,
+		ReplyMarkup: keyboard,
+	}
+	if parseMode == "HTML" {
+		params.ParseMode = models.ParseModeHTML
+	}
+	msg, err := b.api.SendMessage(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("bot: send with keyboard: %w", err)
+	}
+	return msg, nil
+}
+
 // SendEdit edits an existing message using the Telegram editMessageText API.
 func (b *Bot) SendEdit(ctx context.Context, chatID int64, messageID int, text string, parseMode string) (any, error) {
 	if b.api == nil {
@@ -278,12 +299,18 @@ func (b *Bot) IsAllowedUser(userID int64) bool {
 
 // RegisterCommand registers a handler for a bot command.
 func (b *Bot) RegisterCommand(command string, handler func(ctx context.Context, api *bot.Bot, update *models.Update)) {
-	b.api.RegisterHandler(bot.HandlerTypeMessageText, "/"+command, bot.MatchTypeExact, handler)
+	b.api.RegisterHandler(bot.HandlerTypeMessageText, "/"+command, bot.MatchTypePrefix, handler)
 }
 
 // RegisterCallbackHandler registers a handler for callback queries matching the given prefix.
 func (b *Bot) RegisterCallbackHandler(prefix string, handler func(ctx context.Context, api *bot.Bot, update *models.Update)) {
 	b.api.RegisterHandler(bot.HandlerTypeCallbackQueryData, prefix, bot.MatchTypePrefix, handler)
+}
+
+// RegisterDefaultHandler registers a handler for all text messages that don't match
+// a specific command. This is used for plain text prompts.
+func (b *Bot) RegisterDefaultHandler(handler func(ctx context.Context, api *bot.Bot, update *models.Update)) {
+	b.api.RegisterHandler(bot.HandlerTypeMessageText, "", bot.MatchTypePrefix, handler)
 }
 
 // AnswerCallbackQuery answers a callback query, showing a brief text notification

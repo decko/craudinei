@@ -321,8 +321,8 @@ func TestHandlerFormatsApprovalMessageWithHTML(t *testing.T) {
 	}
 
 	// Must contain required HTML formatting tags
-	if !strings.Contains(msg.text, "<b>Approval Required</b>") {
-		t.Errorf("message text missing <b>Approval Required</b>: %q", msg.text)
+	if !strings.Contains(msg.text, "Approval Required") {
+		t.Errorf("message text missing 'Approval Required': %q", msg.text)
 	}
 	if !strings.Contains(msg.text, "<b>Tool:</b>") {
 		t.Errorf("message text missing <b>Tool:</b>: %q", msg.text)

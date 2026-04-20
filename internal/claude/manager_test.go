@@ -84,9 +84,18 @@ func TestStart_Success(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx := context.Background()
-	err := m.Start(ctx, tmpDir)
-	if err != nil {
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
+	if err := m.Start(ctx, tmpDir); err != nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatalf("Start() unexpected error: %v", err)
+	}
+
+	// Simulate the init event that transitions state to running
+	if err := sm.Transition(types.StatusRunning); err != nil {
+		t.Fatalf("Transition to running failed: %v", err)
 	}
 
 	if m.PID() == 0 {
@@ -95,8 +104,8 @@ func TestStart_Success(t *testing.T) {
 	if !m.IsRunning() {
 		t.Error("IsRunning should be true after Start")
 	}
-	if sm.Status() != types.StatusStarting {
-		t.Errorf("Status = %s, want %s", sm.Status(), types.StatusStarting)
+	if sm.Status() != types.StatusRunning {
+		t.Errorf("Status = %s, want %s", sm.Status(), types.StatusRunning)
 	}
 
 	// Verify PID file was written
@@ -112,7 +121,12 @@ func TestStart_Success(t *testing.T) {
 		t.Errorf("PID file contains %d, want %d", pid, m.PID())
 	}
 
-	m.Stop(ctx)
+	if err := sm.Transition(types.StatusStopping); err != nil {
+		t.Fatalf("Transition to stopping failed: %v", err)
+	}
+	if err := m.Stop(ctx); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
+	}
 }
 
 func TestStart_MissingAPIKey(t *testing.T) {
@@ -144,13 +158,20 @@ func TestStart_MissingAPIKey(t *testing.T) {
 	}()
 
 	ctx := context.Background()
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
 	err := m.Start(ctx, tmpDir)
 	if err == nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatal("Start() expected error for missing API key, got nil")
 	}
 	if !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
 		t.Errorf("error = %q, want to contain ANTHROPIC_API_KEY", err)
 	}
+	_ = sm.Transition(types.StatusCrashed)
+	_ = sm.Transition(types.StatusIdle)
 }
 
 func TestStart_InvalidWorkDir(t *testing.T) {
@@ -175,10 +196,17 @@ func TestStart_InvalidWorkDir(t *testing.T) {
 
 	otherDir := t.TempDir()
 	ctx := context.Background()
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
 	err := m.Start(ctx, otherDir)
 	if err == nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatal("Start() expected error for invalid workDir, got nil")
 	}
+	_ = sm.Transition(types.StatusCrashed)
+	_ = sm.Transition(types.StatusIdle)
 }
 
 func TestStart_AlreadyRunning(t *testing.T) {
@@ -202,8 +230,13 @@ func TestStart_AlreadyRunning(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx := context.Background()
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
 	err := m.Start(ctx, tmpDir)
 	if err != nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatalf("first Start() failed: %v", err)
 	}
 
@@ -215,7 +248,19 @@ func TestStart_AlreadyRunning(t *testing.T) {
 		t.Errorf("error = %q, want to contain 'already running'", err)
 	}
 
-	m.Stop(ctx)
+	// Simulate the init event that transitions state to running
+	if err := sm.Transition(types.StatusRunning); err != nil {
+		t.Fatalf("Transition to running failed: %v", err)
+	}
+
+	if err := sm.Transition(types.StatusStopping); err != nil {
+		t.Fatalf("Transition to stopping failed: %v", err)
+	}
+	if err := m.Stop(ctx); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
+	}
+	// Handler transitions to idle after stop
+	_ = sm.Transition(types.StatusIdle)
 }
 
 func TestStop_Success(t *testing.T) {
@@ -240,15 +285,28 @@ func TestStop_Success(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx := context.Background()
-	err := m.Start(ctx, tmpDir)
-	if err != nil {
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
+	if err := m.Start(ctx, tmpDir); err != nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatalf("Start() failed: %v", err)
 	}
 
-	err = m.Stop(ctx)
-	if err != nil {
+	// Simulate the init event that transitions state to running
+	if err := sm.Transition(types.StatusRunning); err != nil {
+		t.Fatalf("Transition to running failed: %v", err)
+	}
+
+	if err := sm.Transition(types.StatusStopping); err != nil {
+		t.Fatalf("Transition to stopping failed: %v", err)
+	}
+	if err := m.Stop(ctx); err != nil {
 		t.Fatalf("Stop() unexpected error: %v", err)
 	}
+	// Handler transitions to idle after stop
+	_ = sm.Transition(types.StatusIdle)
 
 	if m.PID() != 0 {
 		t.Error("PID should be 0 after Stop")
@@ -284,10 +342,13 @@ func TestStop_NotRunning(t *testing.T) {
 	m := NewManager(cfg, sm, queue, r, slog.Default())
 
 	ctx := context.Background()
+	// No state transition needed — manager is not running, so Stop() should return error
 	err := m.Stop(ctx)
 	if err == nil {
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatal("Stop() expected error when not running, got nil")
 	}
+	_ = sm.Transition(types.StatusIdle)
 	if !strings.Contains(err.Error(), "no subprocess running") {
 		t.Errorf("error = %q, want to contain 'no subprocess running'", err)
 	}
@@ -423,10 +484,17 @@ func TestStart_InvalidBinary(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx := context.Background()
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
 	err := m.Start(ctx, tmpDir)
 	if err == nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatal("Start() expected error for invalid binary, got nil")
 	}
+	_ = sm.Transition(types.StatusCrashed)
+	_ = sm.Transition(types.StatusIdle)
 
 	// State machine should be back to idle (via crashed), not stuck in starting
 	if sm.Status() != types.StatusIdle {
@@ -464,20 +532,37 @@ func TestStop_ContextCancellation(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx := context.Background()
-	err := m.Start(ctx, tmpDir)
-	if err != nil {
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
+	if err := m.Start(ctx, tmpDir); err != nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Simulate the init event that transitions state to running
+	if err := sm.Transition(types.StatusRunning); err != nil {
+		t.Fatalf("Transition to running failed: %v", err)
 	}
 
 	// Create a cancelled context
 	cancelledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	// Stop with cancelled context should still clean up properly
-	err = m.Stop(cancelledCtx)
-	if err != nil {
-		t.Fatalf("Stop() unexpected error with cancelled context: %v", err)
+	// Transition to stopping before calling Stop (handlers own state transitions)
+	if err := sm.Transition(types.StatusStopping); err != nil {
+		t.Fatalf("Transition to stopping failed: %v", err)
 	}
+
+	// Stop with cancelled context should still clean up properly
+	stopErr := m.Stop(cancelledCtx)
+	if stopErr != nil {
+		t.Fatalf("Stop() unexpected error with cancelled context: %v", stopErr)
+	}
+
+	// Handler owns state transitions — transition to idle after Stop
+	_ = sm.Transition(types.StatusIdle)
 
 	// State machine should be idle
 	if sm.Status() != types.StatusIdle {
@@ -531,8 +616,18 @@ func TestPipeManagement_StdinWriter(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx := context.Background()
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
 	if err := m.Start(ctx, tmpDir); err != nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Simulate the init event that transitions state to running
+	if err := sm.Transition(types.StatusRunning); err != nil {
+		t.Fatalf("Transition to running failed: %v", err)
 	}
 
 	// Wait for reader to be ready
@@ -552,6 +647,9 @@ func TestPipeManagement_StdinWriter(t *testing.T) {
 	// Give time for the writer to process and exit
 	time.Sleep(200 * time.Millisecond)
 
+	if err := sm.Transition(types.StatusStopping); err != nil {
+		t.Fatalf("Transition to stopping failed: %v", err)
+	}
 	if err := m.Stop(ctx); err != nil {
 		t.Fatalf("Stop() failed: %v", err)
 	}
@@ -591,8 +689,18 @@ func TestPipeManagement_StdoutReader(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx := context.Background()
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
 	if err := m.Start(ctx, tmpDir); err != nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Simulate the init event that transitions state to running
+	if err := sm.Transition(types.StatusRunning); err != nil {
+		t.Fatalf("Transition to running failed: %v", err)
 	}
 
 	// Wait for reader to be ready
@@ -611,8 +719,16 @@ func TestPipeManagement_StdoutReader(t *testing.T) {
 		t.Log("No events received - this may be due to timing")
 	}
 
+	if err := sm.Transition(types.StatusStopping); err != nil {
+		t.Fatalf("Transition to stopping failed: %v", err)
+	}
 	if err := m.Stop(ctx); err != nil {
 		t.Fatalf("Stop() failed: %v", err)
+	}
+
+	// Verify manager is stopped
+	if m.IsRunning() {
+		t.Error("IsRunning should be false after Stop")
 	}
 }
 
@@ -638,8 +754,18 @@ func TestPipeManagement_ContextCancellation(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx := context.Background()
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
 	if err := m.Start(ctx, tmpDir); err != nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Simulate the init event that transitions state to running
+	if err := sm.Transition(types.StatusRunning); err != nil {
+		t.Fatalf("Transition to running failed: %v", err)
 	}
 
 	// Wait for reader to be ready
@@ -650,6 +776,11 @@ func TestPipeManagement_ContextCancellation(t *testing.T) {
 	// Create a cancelled context
 	cancelledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
+
+	// Transition to stopping before calling Stop (handlers own state transitions)
+	if err := sm.Transition(types.StatusStopping); err != nil {
+		t.Fatalf("Transition to stopping failed: %v", err)
+	}
 
 	// Stop should complete even with cancelled context
 	if err := m.Stop(cancelledCtx); err != nil {
@@ -690,8 +821,18 @@ exit 1
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx := context.Background()
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
 	if err := m.Start(ctx, tmpDir); err != nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Simulate the init event that transitions state to running
+	if err := sm.Transition(types.StatusRunning); err != nil {
+		t.Fatalf("Transition to running failed: %v", err)
 	}
 
 	// Wait for reader to be ready
@@ -713,7 +854,10 @@ exit 1
 		t.Errorf("Enqueue() after crash error = %v, want ErrQueueClosed", err)
 	}
 
-	// Stop to clean up
+	// Transition from crashed to idle, then clean up
+	_ = sm.Transition(types.StatusIdle)
+
+	// Stop to clean up (process already exited, but Stop handles the stopped process)
 	if err := m.Stop(ctx); err != nil {
 		t.Fatalf("Stop() failed: %v", err)
 	}
@@ -741,8 +885,18 @@ func TestPipeManagement_StopCleansUp(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx := context.Background()
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
 	if err := m.Start(ctx, tmpDir); err != nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Simulate the init event that transitions state to running
+	if err := sm.Transition(types.StatusRunning); err != nil {
+		t.Fatalf("Transition to running failed: %v", err)
 	}
 
 	// Wait for reader to be ready
@@ -750,6 +904,9 @@ func TestPipeManagement_StopCleansUp(t *testing.T) {
 		t.Fatalf("WaitReady() failed: %v", err)
 	}
 
+	if err := sm.Transition(types.StatusStopping); err != nil {
+		t.Fatalf("Transition to stopping failed: %v", err)
+	}
 	if err := m.Stop(ctx); err != nil {
 		t.Fatalf("Stop() failed: %v", err)
 	}
@@ -788,8 +945,18 @@ func TestSaveSession(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx := context.Background()
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
 	if err := m.Start(ctx, tmpDir); err != nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Simulate the init event that transitions state to running
+	if err := sm.Transition(types.StatusRunning); err != nil {
+		t.Fatalf("Transition to running failed: %v", err)
 	}
 
 	// Wait for the init event to set session ID
@@ -829,7 +996,12 @@ func TestSaveSession(t *testing.T) {
 		t.Error("StartedAt should not be zero")
 	}
 
-	m.Stop(ctx)
+	if err := sm.Transition(types.StatusStopping); err != nil {
+		t.Fatalf("Transition to stopping failed: %v", err)
+	}
+	if err := m.Stop(ctx); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
+	}
 }
 
 func TestLoadSession(t *testing.T) {
@@ -981,8 +1153,18 @@ func TestResume(t *testing.T) {
 	ctx := context.Background()
 
 	// Start initial session
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
 	if err := m.Start(ctx, tmpDir); err != nil {
+		_ = sm.Transition(types.StatusCrashed)
+		_ = sm.Transition(types.StatusIdle)
 		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Simulate the init event that transitions state to running
+	if err := sm.Transition(types.StatusRunning); err != nil {
+		t.Fatalf("Transition to running failed: %v", err)
 	}
 
 	// Set session ID via state machine
@@ -995,11 +1177,22 @@ func TestResume(t *testing.T) {
 	}
 
 	// Stop the session
+	if err := sm.Transition(types.StatusStopping); err != nil {
+		t.Fatalf("Transition to stopping failed: %v", err)
+	}
 	if err := m.Stop(ctx); err != nil {
 		t.Fatalf("Stop() failed: %v", err)
 	}
+	// After Stop completes, transition to idle (handler owns this transition)
+	if err := sm.Transition(types.StatusIdle); err != nil {
+		t.Fatalf("Transition to idle failed: %v", err)
+	}
 
 	// Resume with the session ID
+	// Transition to starting before Resume (handler owns this transition)
+	if err := sm.Transition(types.StatusStarting); err != nil {
+		t.Fatalf("Transition to starting failed: %v", err)
+	}
 	if err := m.Resume(ctx, "resume-test-session-001"); err != nil {
 		t.Fatalf("Resume() failed: %v", err)
 	}
@@ -1012,6 +1205,11 @@ func TestResume(t *testing.T) {
 		t.Error("PID should not be 0 after Resume")
 	}
 
+	// After Resume, transition to running (simulating init event)
+	if err := sm.Transition(types.StatusRunning); err != nil {
+		t.Fatalf("Transition to running failed: %v", err)
+	}
+
 	// Verify session file was updated with new PID
 	loaded, err := m.LoadSession()
 	if err != nil {
@@ -1021,7 +1219,12 @@ func TestResume(t *testing.T) {
 		t.Errorf("SessionID = %q, want resume-test-session-001", loaded.SessionID)
 	}
 
-	m.Stop(ctx)
+	if err := sm.Transition(types.StatusStopping); err != nil {
+		t.Fatalf("Transition to stopping failed: %v", err)
+	}
+	if err := m.Stop(ctx); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
+	}
 }
 
 func TestResume_SessionNotFound(t *testing.T) {

@@ -61,8 +61,15 @@ func run() error {
 	sm := claude.NewStateMachine(types.StatusIdle)
 	queue := claude.NewInputQueue(5)
 
+	// Create EventLoop pointer that will be set after telegramBot is created.
+	// The router callback captures this pointer, so it will use the actual
+	// EventLoop once it's assigned below.
+	var eventLoop *bot.EventLoop
+
 	eventRouter := router.NewRouter(func(event router.ClassifiedEvent) {
-		handleClassifiedEvent(event, sm, logger)
+		if eventLoop != nil {
+			eventLoop.HandleEvent(event)
+		}
 	})
 
 	manager := claude.NewManager(cfg, sm, queue, eventRouter, logger)
@@ -81,6 +88,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("main: creating bot: %w", err)
 	}
+
+	// Create EventLoop now that we have the bot
+	eventLoop = bot.NewEventLoop(telegramBot, cfg.Telegram.AllowedUsers[0], sm.SessionState(), bot.DefaultEventLoopConfig(), logger)
 
 	handlerCfg := &bot.HandlerConfig{
 		AllowedPaths:   cfg.Claude.AllowedPaths,
@@ -103,6 +113,19 @@ func run() error {
 	telegramBot.RegisterCommand("resume", wrapHandler(handlers, (*bot.Handlers).HandleResume))
 	telegramBot.RegisterCommand("sessions", wrapHandler(handlers, (*bot.Handlers).HandleSessions))
 	telegramBot.RegisterCommand("reload", wrapHandler(handlers, (*bot.Handlers).HandleReload))
+
+	// Register plain text handler for non-command messages (FR-016)
+	telegramBot.RegisterDefaultHandler(func(ctx context.Context, api *tgbot.Bot, update *models.Update) {
+		if update.Message == nil || update.Message.Text == "" {
+			return
+		}
+		// Skip commands (already handled by RegisterCommand with prefix matching)
+		if strings.HasPrefix(update.Message.Text, "/") {
+			return
+		}
+		botUpdate := convertUpdate(update)
+		handlers.HandleTextMessage(ctx, nil, botUpdate)
+	})
 
 	// Adapter for bot.Bot to satisfy approval.BotSender interface.
 	// The return type difference (*models.Message vs *struct{}) requires adaptation.
@@ -205,6 +228,18 @@ func run() error {
 		return fmt.Errorf("main: starting approval server: %w", err)
 	}
 
+	// Write MCP config file to disk so Claude Code can find the approval server.
+	// This must happen after the approval server starts (to get the port) and
+	// before any session starts (so the --mcp-config flag points to a valid file).
+	mcpConfig, err := approvalServer.GenerateMCPConfig()
+	if err != nil {
+		return fmt.Errorf("main: generating MCP config: %w", err)
+	}
+	if err := os.WriteFile("/tmp/craudinei-mcp.json", []byte(mcpConfig), 0600); err != nil {
+		return fmt.Errorf("main: writing MCP config: %w", err)
+	}
+	logger.Info("MCP config written", "path", "/tmp/craudinei-mcp.json")
+
 	if err := telegramBot.SetMyCommands(ctx); err != nil {
 		logger.Warn("failed to set bot commands", "err", err)
 	}
@@ -212,6 +247,9 @@ func run() error {
 	if err := telegramBot.Start(ctx); err != nil {
 		return fmt.Errorf("main: starting bot: %w", err)
 	}
+
+	// Start the event loop to process classified events from the router
+	eventLoop.Start(ctx)
 
 	shutdownCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -237,6 +275,9 @@ func run() error {
 	if err := manager.Stop(stopCtx); err != nil {
 		logger.Error("manager stop error", "err", err)
 	}
+
+	// Stop the event loop before stopping the bot
+	eventLoop.Stop()
 
 	telegramBot.Stop()
 
@@ -327,26 +368,21 @@ func (a *approvalBotSenderAdapter) Send(ctx context.Context, chatID int64, text 
 	return a.bot.SendPriority(ctx, chatID, text, parseMode, bot.PriorityHigh)
 }
 
-// handleClassifiedEvent processes router events and updates state.
-func handleClassifiedEvent(event router.ClassifiedEvent, sm *claude.StateMachine, logger *slog.Logger) {
-	switch event.Action {
-	case router.ActionSystem:
-		logger.Debug("system event", "subtype", event.Event.Subtype)
-	case router.ActionText:
-		logger.Debug("text event", "text", event.Text)
-	case router.ActionToolUse:
-		logger.Debug("tool use event", "subtype", event.Event.Subtype)
-	case router.ActionResult:
-		logger.Debug("result event", "result", event.Text)
-	case router.ActionThinking:
-		logger.Debug("thinking event")
-	case router.ActionRateLimit:
-		logger.Warn("rate limit hit", "retry_after", event.Event.RetryAfterSeconds)
-	case router.ActionAPIRetry:
-		logger.Warn("api retry", "attempt", event.Event.Attempt, "max", event.Event.MaxRetries)
-	case router.ActionError:
-		logger.Error("error event", "is_error", event.Event.IsError)
+func (a *approvalBotSenderAdapter) SendWithKeyboard(ctx context.Context, chatID int64, text string, parseMode string, keyboard approval.InlineKeyboardMarkup) (any, error) {
+	// Convert approval.InlineKeyboardMarkup to models.InlineKeyboardMarkup
+	var rows [][]models.InlineKeyboardButton
+	for _, row := range keyboard.InlineKeyboard {
+		var buttons []models.InlineKeyboardButton
+		for _, btn := range row {
+			buttons = append(buttons, models.InlineKeyboardButton{
+				Text:         btn.Text,
+				CallbackData: btn.CallbackData,
+			})
+		}
+		rows = append(rows, buttons)
 	}
+	markup := models.InlineKeyboardMarkup{InlineKeyboard: rows}
+	return a.bot.SendWithKeyboard(ctx, chatID, text, parseMode, markup)
 }
 
 // handlerFunc is the function signature expected by bot.RegisterCommand.
