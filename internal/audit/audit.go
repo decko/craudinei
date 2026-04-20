@@ -2,13 +2,17 @@
 package audit
 
 import (
+	"fmt"
 	"log/slog"
+	"os"
 )
 
 // Logger is a structured audit logger that wraps slog.Logger with
 // domain-specific logging methods for auth, commands, tools, and sessions.
 type Logger struct {
-	log *slog.Logger
+	log       *slog.Logger
+	file      *os.File
+	closeable bool
 }
 
 // New creates a new audit Logger that writes to the given slog.Logger.
@@ -17,6 +21,39 @@ func New(log *slog.Logger) *Logger {
 		panic("audit: logger must not be nil")
 	}
 	return &Logger{log: log}
+}
+
+// NewWithFile creates a new audit Logger that writes to the specified file path.
+// If auditFilePath is empty, writes to stderr.
+// The returned Logger must be closed when done if a file path was provided.
+func NewWithFile(auditFilePath string) (*Logger, error) {
+	if auditFilePath == "" {
+		handler := slog.NewJSONHandler(os.Stderr, nil)
+		return &Logger{log: slog.New(handler)}, nil
+	}
+
+	file, err := os.OpenFile(auditFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("audit: opening log file: %w", err)
+	}
+
+	handler := slog.NewJSONHandler(file, nil)
+	return &Logger{
+		log:       slog.New(handler),
+		file:      file,
+		closeable: true,
+	}, nil
+}
+
+// Close closes the underlying file handle if one was opened.
+// It is safe to call Close on a Logger that writes to stderr.
+func (l *Logger) Close() error {
+	if l.closeable && l.file != nil {
+		err := l.file.Close()
+		l.closeable = false
+		return err
+	}
+	return nil
 }
 
 // AuthAttempt logs an authentication attempt.

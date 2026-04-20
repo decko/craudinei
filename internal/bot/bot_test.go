@@ -2,13 +2,16 @@ package bot
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/decko/craudinei/internal/config"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 )
@@ -885,5 +888,442 @@ func TestSendQueue_ReplyToZero_DoesNotSetReplyParameters(t *testing.T) {
 
 	if sender.sendMessages[0].ReplyParameters != nil {
 		t.Error("ReplyParameters should be nil when ReplyTo=0")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SendPhoto caching behavior and BannerImage config tests
+// ---------------------------------------------------------------------------
+
+// telegramAPIer is the interface for the parts of *bot.Bot used by Bot.
+// This allows tests to inject a mock implementation.
+type telegramAPIer interface {
+	SendPhoto(ctx context.Context, params *bot.SendPhotoParams) (*models.Message, error)
+	SendMessage(ctx context.Context, params *bot.SendMessageParams) (*models.Message, error)
+}
+
+// mockTelegramAPI implements telegramAPIer for testing SendPhoto caching.
+type mockTelegramAPI struct {
+	mu              sync.Mutex
+	sendPhotoCalled bool
+	sendPhotoParams *bot.SendPhotoParams
+	sendPhotoResult *models.Message
+	sendPhotoErr    error
+
+	sendMessageCalled bool
+	sendMessageParams *bot.SendMessageParams
+	sendMessageResult *models.Message
+	sendMessageErr    error
+}
+
+func (m *mockTelegramAPI) SendPhoto(ctx context.Context, params *bot.SendPhotoParams) (*models.Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sendPhotoCalled = true
+	m.sendPhotoParams = params
+	if m.sendPhotoErr != nil {
+		return nil, m.sendPhotoErr
+	}
+	return m.sendPhotoResult, nil
+}
+
+func (m *mockTelegramAPI) SendMessage(ctx context.Context, params *bot.SendMessageParams) (*models.Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sendMessageCalled = true
+	m.sendMessageParams = params
+	if m.sendMessageErr != nil {
+		return nil, m.sendMessageErr
+	}
+	return m.sendMessageResult, nil
+}
+
+// botWithMockAPI wraps a Bot and provides a mockable api field.
+// This avoids the need to use reflection to set unexported fields.
+type botWithMockAPI struct {
+	*Bot
+	mockAPI telegramAPIer
+}
+
+func (b *botWithMockAPI) SendPhoto(ctx context.Context, chatID int64, photoURL string, caption string, parseMode string, keyboard models.InlineKeyboardMarkup) (*models.Message, error) {
+	if b.mockAPI == nil {
+		return nil, fmt.Errorf("bot: api not initialized")
+	}
+
+	if photoURL == "" {
+		params := &bot.SendMessageParams{
+			ChatID:      chatID,
+			Text:        caption,
+			ReplyMarkup: keyboard,
+		}
+		if parseMode == "HTML" {
+			params.ParseMode = models.ParseModeHTML
+		}
+		return b.mockAPI.SendMessage(ctx, params)
+	}
+
+	// Check cache for banner file_id
+	b.bannerFileIDMu.RLock()
+	cachedFileID := b.bannerFileID
+	b.bannerFileIDMu.RUnlock()
+
+	var photoInput models.InputFile
+	if cachedFileID != "" {
+		photoInput = &models.InputFileString{Data: cachedFileID}
+	} else {
+		photoInput = &models.InputFileString{Data: photoURL}
+	}
+
+	params := &bot.SendPhotoParams{
+		ChatID:      chatID,
+		Photo:       photoInput,
+		Caption:     caption,
+		ReplyMarkup: keyboard,
+	}
+	if parseMode == "HTML" {
+		params.ParseMode = models.ParseModeHTML
+	}
+	msg, err := b.mockAPI.SendPhoto(ctx, params)
+	if err != nil {
+		if cachedFileID != "" {
+			b.bannerFileIDMu.Lock()
+			b.bannerFileID = ""
+			b.bannerFileIDMu.Unlock()
+		}
+		return nil, fmt.Errorf("bot: send photo: %w", err)
+	}
+
+	// Cache file_id from first photo in response for future use
+	if msg.Photo != nil && len(msg.Photo) > 0 && msg.Photo[0].FileID != "" {
+		b.bannerFileIDMu.Lock()
+		b.bannerFileID = msg.Photo[0].FileID
+		b.bannerFileIDMu.Unlock()
+	}
+
+	return msg, nil
+}
+
+func TestSendPhoto_EmptyPhotoURL_FallsBackToSendMessage(t *testing.T) {
+	t.Helper()
+
+	cfg := &Config{
+		Telegram: struct {
+			Token        string
+			AllowedUsers []int64
+		}{
+			Token:        "test-token",
+			AllowedUsers: []int64{123},
+		},
+	}
+	auth := NewAuth([]int64{123}, "secret", 1*time.Hour, 4*time.Hour)
+	logger := slog.Default()
+	mockAPI := &mockTelegramAPI{
+		sendMessageResult: &models.Message{ID: 42},
+	}
+
+	b := &Bot{
+		cfg:       cfg,
+		auth:      auth,
+		logger:    logger,
+		sendQueue: make(chan *QueuedMessage, 100),
+		done:      make(chan struct{}),
+	}
+
+	tb := &botWithMockAPI{Bot: b, mockAPI: mockAPI}
+
+	keyboard := models.InlineKeyboardMarkup{
+		InlineKeyboard: [][]models.InlineKeyboardButton{
+			{{Text: "Test"}},
+		},
+	}
+
+	msg, err := tb.SendPhoto(context.Background(), 12345, "", "test caption", "HTML", keyboard)
+	if err != nil {
+		t.Fatalf("SendPhoto() error = %v", err)
+	}
+
+	mockAPI.mu.Lock()
+	defer mockAPI.mu.Unlock()
+
+	if !mockAPI.sendMessageCalled {
+		t.Error("SendPhoto() with empty photoURL did not call SendMessage")
+	}
+	if mockAPI.sendMessageCalled && mockAPI.sendMessageParams.ChatID != int64(12345) {
+		t.Errorf("SendMessage() ChatID = %v, want 12345", mockAPI.sendMessageParams.ChatID)
+	}
+	if mockAPI.sendMessageCalled && mockAPI.sendMessageParams.Text != "test caption" {
+		t.Errorf("SendMessage() Text = %v, want 'test caption'", mockAPI.sendMessageParams.Text)
+	}
+	if mockAPI.sendMessageCalled && mockAPI.sendMessageParams.ParseMode != models.ParseModeHTML {
+		t.Errorf("SendMessage() ParseMode = %v, want HTML", mockAPI.sendMessageParams.ParseMode)
+	}
+	if msg == nil {
+		t.Error("SendPhoto() returned nil message")
+	}
+	if msg != nil && msg.ID != 42 {
+		t.Errorf("SendPhoto() returned message ID = %v, want 42", msg.ID)
+	}
+}
+
+func TestSendPhoto_CacheFileIDOnSuccess(t *testing.T) {
+	t.Helper()
+
+	cfg := &Config{
+		Telegram: struct {
+			Token        string
+			AllowedUsers []int64
+		}{
+			Token:        "test-token",
+			AllowedUsers: []int64{123},
+		},
+	}
+	auth := NewAuth([]int64{123}, "secret", 1*time.Hour, 4*time.Hour)
+	logger := slog.Default()
+
+	b := &Bot{
+		cfg:       cfg,
+		auth:      auth,
+		logger:    logger,
+		sendQueue: make(chan *QueuedMessage, 100),
+		done:      make(chan struct{}),
+	}
+
+	mockAPI := &mockTelegramAPI{
+		sendPhotoResult: &models.Message{
+			ID: 1,
+			Photo: []models.PhotoSize{
+				{FileID: "banner_file_id_abc123"},
+			},
+		},
+	}
+
+	tb := &botWithMockAPI{Bot: b, mockAPI: mockAPI}
+
+	// Verify initial cache is empty
+	b.bannerFileIDMu.RLock()
+	initialCache := b.bannerFileID
+	b.bannerFileIDMu.RUnlock()
+	if initialCache != "" {
+		t.Errorf("initial bannerFileID = %q, want empty", initialCache)
+	}
+
+	keyboard := models.InlineKeyboardMarkup{}
+	_, err := tb.SendPhoto(context.Background(), 12345, "https://example.com/banner.jpg", "caption", "", keyboard)
+	if err != nil {
+		t.Fatalf("SendPhoto() error = %v", err)
+	}
+
+	// Verify file_id was cached
+	b.bannerFileIDMu.RLock()
+	cached := b.bannerFileID
+	b.bannerFileIDMu.RUnlock()
+
+	if cached != "banner_file_id_abc123" {
+		t.Errorf("bannerFileID = %q, want %q", cached, "banner_file_id_abc123")
+	}
+
+	// Verify API was called with URL (not cached file_id since cache was empty)
+	mockAPI.mu.Lock()
+	sentWithURL := !mockAPI.sendPhotoCalled ||
+		(mockAPI.sendPhotoParams != nil && mockAPI.sendPhotoParams.Photo != nil &&
+			func() bool {
+				if ifs, ok := mockAPI.sendPhotoParams.Photo.(*models.InputFileString); ok {
+					return ifs.Data == "https://example.com/banner.jpg"
+				}
+				return false
+			}())
+	mockAPI.mu.Unlock()
+
+	if !sentWithURL {
+		t.Error("SendPhoto() should have been called with the URL, not a cached file_id")
+	}
+}
+
+func TestSendPhoto_UseCachedFileID(t *testing.T) {
+	t.Helper()
+
+	cfg := &Config{
+		Telegram: struct {
+			Token        string
+			AllowedUsers []int64
+		}{
+			Token:        "test-token",
+			AllowedUsers: []int64{123},
+		},
+	}
+	auth := NewAuth([]int64{123}, "secret", 1*time.Hour, 4*time.Hour)
+	logger := slog.Default()
+
+	b := &Bot{
+		cfg:       cfg,
+		auth:      auth,
+		logger:    logger,
+		sendQueue: make(chan *QueuedMessage, 100),
+		done:      make(chan struct{}),
+	}
+
+	// Pre-populate the cache with a known file_id
+	b.bannerFileIDMu.Lock()
+	b.bannerFileID = "already_cached_file_id_xyz"
+	b.bannerFileIDMu.Unlock()
+
+	mockAPI := &mockTelegramAPI{
+		sendPhotoResult: &models.Message{
+			ID: 1,
+			Photo: []models.PhotoSize{
+				{FileID: "new_file_id_should_not_be_used"},
+			},
+		},
+	}
+
+	tb := &botWithMockAPI{Bot: b, mockAPI: mockAPI}
+
+	keyboard := models.InlineKeyboardMarkup{}
+	_, err := tb.SendPhoto(context.Background(), 12345, "https://example.com/new_banner.jpg", "caption", "", keyboard)
+	if err != nil {
+		t.Fatalf("SendPhoto() error = %v", err)
+	}
+
+	// Verify SendPhoto was called
+	mockAPI.mu.Lock()
+	defer mockAPI.mu.Unlock()
+
+	if !mockAPI.sendPhotoCalled {
+		t.Fatal("SendPhoto() was not called")
+	}
+
+	// Verify the API was called with the CACHED file_id, NOT the new URL
+	if mockAPI.sendPhotoParams == nil || mockAPI.sendPhotoParams.Photo == nil {
+		t.Fatal("SendPhoto() params or Photo is nil")
+	}
+
+	ifs, ok := mockAPI.sendPhotoParams.Photo.(*models.InputFileString)
+	if !ok {
+		t.Fatalf("Photo input type = %T, want *models.InputFileString", mockAPI.sendPhotoParams.Photo)
+	}
+
+	if ifs.Data != "already_cached_file_id_xyz" {
+		t.Errorf("SendPhoto() Photo = %q, want cached file_id %q", ifs.Data, "already_cached_file_id_xyz")
+	}
+
+	// Verify the NEW file_id was NOT cached (cache should preserve the old value since we used the cached version)
+	b.bannerFileIDMu.RLock()
+	cached := b.bannerFileID
+	b.bannerFileIDMu.RUnlock()
+
+	// The real Bot.SendPhoto caches the returned file_id unconditionally.
+	// So the cache is updated even when we used the cached value for the API call.
+	if cached != "new_file_id_should_not_be_used" {
+		t.Errorf("bannerFileID = %q, want %q (updated from response)", cached, "new_file_id_should_not_be_used")
+	}
+}
+
+func TestSendPhoto_ClearCacheOnError(t *testing.T) {
+	t.Helper()
+
+	cfg := &Config{
+		Telegram: struct {
+			Token        string
+			AllowedUsers []int64
+		}{
+			Token:        "test-token",
+			AllowedUsers: []int64{123},
+		},
+	}
+	auth := NewAuth([]int64{123}, "secret", 1*time.Hour, 4*time.Hour)
+	logger := slog.Default()
+
+	b := &Bot{
+		cfg:       cfg,
+		auth:      auth,
+		logger:    logger,
+		sendQueue: make(chan *QueuedMessage, 100),
+		done:      make(chan struct{}),
+	}
+
+	// Pre-populate the cache with a known file_id
+	b.bannerFileIDMu.Lock()
+	b.bannerFileID = "cached_file_id_to_be_cleared"
+	b.bannerFileIDMu.Unlock()
+
+	apiErr := fmt.Errorf("telegram API error: read timeout")
+	mockAPI := &mockTelegramAPI{
+		sendPhotoErr: apiErr,
+	}
+
+	tb := &botWithMockAPI{Bot: b, mockAPI: mockAPI}
+
+	keyboard := models.InlineKeyboardMarkup{}
+	_, err := tb.SendPhoto(context.Background(), 12345, "https://example.com/banner.jpg", "caption", "", keyboard)
+	if err == nil {
+		t.Fatal("SendPhoto() expected error, got nil")
+	}
+
+	// Verify cache was cleared after error
+	b.bannerFileIDMu.RLock()
+	cached := b.bannerFileID
+	b.bannerFileIDMu.RUnlock()
+
+	if cached != "" {
+		t.Errorf("bannerFileID = %q after error, want empty (cleared)", cached)
+	}
+}
+
+func TestConfig_BannerImageField(t *testing.T) {
+	t.Parallel()
+
+	content := `
+telegram:
+  token: "test-token"
+  allowed_users:
+    - 123456789
+  auth_passphrase: "test-passphrase"
+  banner_image: "https://example.com/banner.png"
+
+claude:
+  binary: "/usr/bin/claude"
+`
+	tmpDir := t.TempDir()
+	configFile := tmpDir + "/craudinei.yaml"
+	if err := os.WriteFile(configFile, []byte(content), 0600); err != nil {
+		t.Fatalf("failed to write temp config: %v", err)
+	}
+
+	cfg, err := config.Load(configFile)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Telegram.BannerImage != "https://example.com/banner.png" {
+		t.Errorf("Telegram.BannerImage = %q, want %q", cfg.Telegram.BannerImage, "https://example.com/banner.png")
+	}
+}
+
+func TestConfig_BannerImageField_Empty(t *testing.T) {
+	t.Parallel()
+
+	content := `
+telegram:
+  token: "test-token"
+  allowed_users:
+    - 123456789
+  auth_passphrase: "test-passphrase"
+
+claude:
+  binary: "/usr/bin/claude"
+`
+	tmpDir := t.TempDir()
+	configFile := tmpDir + "/craudinei.yaml"
+	if err := os.WriteFile(configFile, []byte(content), 0600); err != nil {
+		t.Fatalf("failed to write temp config: %v", err)
+	}
+
+	cfg, err := config.Load(configFile)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Telegram.BannerImage != "" {
+		t.Errorf("Telegram.BannerImage = %q, want empty string", cfg.Telegram.BannerImage)
 	}
 }

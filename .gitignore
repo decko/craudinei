@@ -26,3 +26,4 @@ craudinei.yaml
 
 # Worktrees
 .worktrees/
+.swarm/

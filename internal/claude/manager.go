@@ -339,6 +339,36 @@ func (m *Manager) IsRunning() bool {
 	return m.cmd != nil && m.cmd.Process != nil
 }
 
+// Status returns the current session status from the state machine.
+func (m *Manager) Status() types.SessionStatus {
+	return m.sm.Status()
+}
+
+// SessionID returns the current session ID from the state machine.
+func (m *Manager) SessionID() string {
+	return m.sm.state.SessionID()
+}
+
+// WorkDir returns the current working directory from the state machine.
+func (m *Manager) WorkDir() string {
+	return m.sm.state.WorkDir()
+}
+
+// AllowedCommands returns the list of allowed commands for the current state.
+func (m *Manager) AllowedCommands() []string {
+	return m.sm.AllowedCommands()
+}
+
+// CommandGuard validates whether the given command is allowed in the current state.
+func (m *Manager) CommandGuard(command string) error {
+	return m.sm.CommandGuard(command)
+}
+
+// Transition moves the state machine to the target status if valid.
+func (m *Manager) Transition(target types.SessionStatus) error {
+	return m.sm.Transition(target)
+}
+
 // Stdin returns the stdin pipe writer for direct writes (e.g., approval responses).
 // Returns nil if no subprocess is running.
 func (m *Manager) Stdin() io.WriteCloser {

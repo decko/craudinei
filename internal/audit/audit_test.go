@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
+	"os"
 	"testing"
 )
 
@@ -226,4 +227,91 @@ func TestAuditLog_New_NilLogger(t *testing.T) {
 		}
 	}()
 	New(nil)
+}
+
+func TestAuditLog_NewWithFile_WritesToSeparateFile(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditPath := tmp + "/audit.log"
+
+	logger, err := NewWithFile(auditPath)
+	if err != nil {
+		t.Fatalf("NewWithFile failed: %v", err)
+	}
+	defer logger.Close()
+
+	logger.AuthAttempt(12345, "success", "chat:12345")
+
+	content, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("failed to read audit file: %v", err)
+	}
+
+	if len(content) == 0 {
+		t.Fatal("audit file is empty")
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal(content, &entry); err != nil {
+		t.Fatalf("failed to unmarshal audit JSON: %v", err)
+	}
+
+	if entry["action"] != "auth_attempt" {
+		t.Errorf("expected action=%q, got %q", "auth_attempt", entry["action"])
+	}
+	if entry["user_id"] != float64(12345) {
+		t.Errorf("expected user_id=%v, got %v", 12345, entry["user_id"])
+	}
+}
+
+func TestAuditLog_NewWithFile_EmptyPath_WritesToStderr(t *testing.T) {
+	t.Parallel()
+
+	logger, err := NewWithFile("")
+	if err != nil {
+		t.Fatalf("NewWithFile failed: %v", err)
+	}
+	defer logger.Close()
+
+	// A nil file/closeable indicates stderr was used
+	if logger.file != nil {
+		t.Error("expected nil file for stderr")
+	}
+	if logger.closeable {
+		t.Error("expected closeable=false for stderr")
+	}
+}
+
+func TestAuditLog_NewWithFile_Close(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditPath := tmp + "/audit.log"
+
+	logger, err := NewWithFile(auditPath)
+	if err != nil {
+		t.Fatalf("NewWithFile failed: %v", err)
+	}
+
+	if !logger.closeable {
+		t.Error("expected closeable=true for file-based logger")
+	}
+	if logger.file == nil {
+		t.Error("expected non-nil file for file-based logger")
+	}
+
+	logger.AuthAttempt(99999, "test", "chat:99999")
+
+	if err := logger.Close(); err != nil {
+		t.Errorf("Close failed: %v", err)
+	}
+
+	// Verify the file handle is closed by writing again (should fail or succeed on new fd)
+	logger2, err := NewWithFile(auditPath)
+	if err != nil {
+		t.Fatalf("NewWithFile second open failed: %v", err)
+	}
+	logger2.AuthAttempt(99999, "test2", "chat:99999")
+	logger2.Close()
 }
