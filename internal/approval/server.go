@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -111,10 +112,15 @@ func (s *Server) Stop() {
 }
 
 // GenerateMCPConfig produces the MCP server configuration JSON that tells
-// Claude Code how to connect to this approval server.
+// Claude Code how to connect to the approval MCP shim.
 func (s *Server) GenerateMCPConfig() (string, error) {
 	if s.listener == nil {
 		return "", fmt.Errorf("approval: server not started")
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("approval: resolving executable path: %w", err)
 	}
 
 	port := s.Port()
@@ -128,13 +134,11 @@ func (s *Server) GenerateMCPConfig() (string, error) {
 			Command string   `json:"command"`
 			Args    []string `json:"args"`
 		}{
-			"approval": {
-				Command: "curl",
+			"craudinei": {
+				Command: exe,
 				Args: []string{
-					"-X", "POST",
-					"-H", "Content-Type: application/json",
-					"-d", "@-",
-					fmt.Sprintf("http://127.0.0.1:%d/approval", port),
+					"mcp-shim",
+					"--port", fmt.Sprintf("%d", port),
 				},
 			},
 		},
