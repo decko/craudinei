@@ -89,7 +89,6 @@ func (m *Manager) Start(ctx context.Context, workDir string) error {
 	}
 
 	args := []string{
-		"-p",
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
@@ -605,7 +604,6 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	}
 
 	args := []string{
-		"-p",
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
