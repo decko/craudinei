@@ -130,8 +130,6 @@ func TestStart_Success(t *testing.T) {
 }
 
 func TestStart_MissingAPIKey(t *testing.T) {
-	t.Parallel()
-
 	tmpDir := t.TempDir()
 	mockBin := filepath.Join(tmpDir, "mock_claude.sh")
 	copyFile(t, "mock_claude.sh", mockBin)
@@ -149,13 +147,10 @@ func TestStart_MissingAPIKey(t *testing.T) {
 
 	m := NewManager(cfg, sm, queue, r, slog.Default())
 
-	origKey := os.Getenv("ANTHROPIC_API_KEY")
-	os.Unsetenv("ANTHROPIC_API_KEY")
-	defer func() {
-		if origKey != "" {
-			os.Setenv("ANTHROPIC_API_KEY", origKey)
-		}
-	}()
+	for _, v := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_BEDROCK"} {
+		t.Setenv(v, "")
+		os.Unsetenv(v)
+	}
 
 	ctx := context.Background()
 	if err := sm.Transition(types.StatusStarting); err != nil {
@@ -165,10 +160,10 @@ func TestStart_MissingAPIKey(t *testing.T) {
 	if err == nil {
 		_ = sm.Transition(types.StatusCrashed)
 		_ = sm.Transition(types.StatusIdle)
-		t.Fatal("Start() expected error for missing API key, got nil")
+		t.Fatal("Start() expected error for missing auth, got nil")
 	}
-	if !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
-		t.Errorf("error = %q, want to contain ANTHROPIC_API_KEY", err)
+	if !strings.Contains(err.Error(), "no Claude auth configured") {
+		t.Errorf("error = %q, want to contain 'no Claude auth configured'", err)
 	}
 	_ = sm.Transition(types.StatusCrashed)
 	_ = sm.Transition(types.StatusIdle)
