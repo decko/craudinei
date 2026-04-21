@@ -217,12 +217,14 @@ func (el *EventLoop) handleResult(event router.ClassifiedEvent) {
 func (el *EventLoop) handleSystem(event router.ClassifiedEvent) {
 	el.logger.Info("eventloop: system event", "subtype", event.Event.Subtype, "session_id", event.Event.SessionID)
 
-	// Handle init event — set session ID and transition starting → running
-	if event.Event.Subtype == "init" && event.Event.SessionID != "" {
+	// Set session ID and transition starting → running on the first system
+	// event that carries a session_id. Claude Code emits hook_started (not
+	// "init") as its first system event, so we match on any subtype.
+	if event.Event.SessionID != "" && el.state.SessionID() == "" {
 		el.state.SetSessionID(event.Event.SessionID)
-		if el.state.TransitionStatus(types.StatusStarting, types.StatusRunning) {
-			el.logger.Info("eventloop: session ready", "session_id", event.Event.SessionID)
-		}
+	}
+	if el.state.TransitionStatus(types.StatusStarting, types.StatusRunning) {
+		el.logger.Info("eventloop: session ready", "session_id", el.state.SessionID())
 	}
 }
 
