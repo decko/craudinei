@@ -16,6 +16,7 @@ const (
 	ActionRateLimit Action = "rate_limit" // rate limit hit
 	ActionAPIRetry  Action = "api_retry"  // API retry with countdown
 	ActionError     Action = "error"      // error event
+	ActionIgnore    Action = "ignore"     // unrecognized event, silently skip
 )
 
 // ClassifiedEvent represents an event that has been classified for handling.

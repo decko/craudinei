@@ -92,11 +92,8 @@ func TestClassifyEvent_UnknownType(t *testing.T) {
 	event := types.Event{Type: types.EventUser}
 	got := ClassifyEvent(event)
 
-	if got.Action != ActionError {
-		t.Errorf("Action = %v, want %v", got.Action, ActionError)
-	}
-	if got.Text != "unknown event type" {
-		t.Errorf("Text = %v, want %v", got.Text, "unknown event type")
+	if got.Action != ActionIgnore {
+		t.Errorf("Action = %v, want %v", got.Action, ActionIgnore)
 	}
 }
 

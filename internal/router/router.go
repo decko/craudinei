@@ -99,8 +99,7 @@ func ClassifyEvent(event types.Event) ClassifiedEvent {
 		case "api_retry":
 			action = ActionAPIRetry
 		default:
-			action = ActionError
-			text = "unknown assistant subtype"
+			action = ActionIgnore
 		}
 
 	case types.EventResult:
@@ -111,8 +110,7 @@ func ClassifyEvent(event types.Event) ClassifiedEvent {
 		action = ActionRateLimit
 
 	default:
-		action = ActionError
-		text = "unknown event type"
+		action = ActionIgnore
 	}
 
 	return ClassifiedEvent{
