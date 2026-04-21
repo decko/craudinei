@@ -440,7 +440,7 @@ func (m *Manager) startStdoutReader(ctx context.Context) {
 				continue
 			}
 
-			if err := m.router.Feed(line); err != nil {
+			if err := m.router.Feed(append(line, '\n')); err != nil {
 				m.logger.Error("manager: feeding line to router", "error", err)
 			}
 		}
