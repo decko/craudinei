@@ -84,7 +84,7 @@ func NewBot(cfg *Config, auth *Auth, logger *slog.Logger) (*Bot, error) {
 
 // Start deletes any stale webhook, starts the send queue goroutine, and begins long-polling.
 func (b *Bot) Start(ctx context.Context) error {
-	if _, err := b.api.DeleteWebhook(ctx, &bot.DeleteWebhookParams{}); err != nil {
+	if _, err := b.api.DeleteWebhook(ctx, nil); err != nil {
 		return fmt.Errorf("bot: deleting webhook: %w", err)
 	}
 
