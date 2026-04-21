@@ -217,9 +217,12 @@ func (el *EventLoop) handleResult(event router.ClassifiedEvent) {
 func (el *EventLoop) handleSystem(event router.ClassifiedEvent) {
 	el.logger.Info("eventloop: system event", "subtype", event.Event.Subtype, "session_id", event.Event.SessionID)
 
-	// Handle init event - set session ID
+	// Handle init event — set session ID and transition starting → running
 	if event.Event.Subtype == "init" && event.Event.SessionID != "" {
 		el.state.SetSessionID(event.Event.SessionID)
+		if el.state.TransitionStatus(types.StatusStarting, types.StatusRunning) {
+			el.logger.Info("eventloop: session ready", "session_id", event.Event.SessionID)
+		}
 	}
 }
 
