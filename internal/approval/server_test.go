@@ -152,10 +152,15 @@ func TestMCPConfigGeneration(t *testing.T) {
 		t.Error("Port() = 0 before GenerateMCPConfig, want non-zero")
 	}
 
-	// Should contain the port in the URL
-	expectedPort := fmt.Sprintf("127.0.0.1:%d", port)
+	// Should contain the port in the args
+	expectedPort := fmt.Sprintf("%d", port)
 	if !strings.Contains(cfgOut, expectedPort) {
-		t.Errorf("GenerateMCPConfig() = %s, want to contain %s", cfgOut, expectedPort)
+		t.Errorf("GenerateMCPConfig() = %s, want to contain port %s", cfgOut, expectedPort)
+	}
+
+	// Should use craudinei server name
+	if !strings.Contains(cfgOut, `"craudinei"`) {
+		t.Errorf("GenerateMCPConfig() = %s, want to contain craudinei server", cfgOut)
 	}
 }
 

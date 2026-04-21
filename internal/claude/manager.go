@@ -99,7 +99,7 @@ func (m *Manager) Start(ctx context.Context, workDir string) error {
 		args = append(args, "--allowedTools", tool)
 	}
 	args = append(args,
-		"--permission-prompt-tool", "craudinei_approval",
+		"--permission-prompt-tool", "mcp__craudinei__approval",
 		"--mcp-config", "/tmp/craudinei-mcp.json",
 		"--max-turns", fmt.Sprintf("%d", m.cfg.Claude.MaxTurns),
 		"--max-budget-usd", fmt.Sprintf("%f", m.cfg.Claude.MaxBudgetUSD),
@@ -616,7 +616,7 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 		args = append(args, "--allowedTools", tool)
 	}
 	args = append(args,
-		"--permission-prompt-tool", "craudinei_approval",
+		"--permission-prompt-tool", "mcp__craudinei__approval",
 		"--mcp-config", "/tmp/craudinei-mcp.json",
 		"--max-turns", fmt.Sprintf("%d", m.cfg.Claude.MaxTurns),
 		"--max-budget-usd", fmt.Sprintf("%f", m.cfg.Claude.MaxBudgetUSD),

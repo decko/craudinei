@@ -243,42 +243,46 @@ func TestGenerateMCPConfigValidJSON(t *testing.T) {
 		t.Fatal("mcpServers key missing or not a map")
 	}
 
-	// Must have "approval" server
-	approval, ok := mcpServers["approval"].(map[string]any)
+	// Must have "craudinei" server
+	craudinei, ok := mcpServers["craudinei"].(map[string]any)
 	if !ok {
-		t.Fatal("mcpServers.approval missing or not a map")
+		t.Fatal("mcpServers.craudinei missing or not a map")
 	}
 
-	// Must have "command" set to "curl"
-	cmd, ok := approval["command"].(string)
+	// Must have "command" set to the test binary
+	cmd, ok := craudinei["command"].(string)
 	if !ok {
-		t.Fatal("approval.command missing or not a string")
+		t.Fatal("craudinei.command missing or not a string")
 	}
-	if cmd != "curl" {
-		t.Errorf("command = %q, want %q", cmd, "curl")
+	if cmd == "" {
+		t.Error("craudinei.command is empty")
 	}
 
-	// Must have "args" array
-	args, ok := approval["args"].([]any)
+	// Must have "args" containing mcp-shim and port
+	args, ok := craudinei["args"].([]any)
 	if !ok {
-		t.Fatal("approval.args missing or not an array")
-	}
-	if len(args) == 0 {
-		t.Error("approval.args is empty")
+		t.Fatal("craudinei.args missing or not an array")
 	}
 
-	// Must contain the server URL with 127.0.0.1
 	port := srv.Port()
-	expectedHost := fmt.Sprintf("127.0.0.1:%d", port)
-	found := false
+	expectedPort := fmt.Sprintf("%d", port)
+	foundShim := false
+	foundPort := false
 	for _, a := range args {
-		if s, ok := a.(string); ok && strings.Contains(s, expectedHost) {
-			found = true
-			break
+		if s, ok := a.(string); ok {
+			if s == "mcp-shim" {
+				foundShim = true
+			}
+			if s == expectedPort {
+				foundPort = true
+			}
 		}
 	}
-	if !found {
-		t.Errorf("MCP config args = %v, want one to contain %q", args, expectedHost)
+	if !foundShim {
+		t.Errorf("MCP config args = %v, want to contain mcp-shim", args)
+	}
+	if !foundPort {
+		t.Errorf("MCP config args = %v, want to contain port %s", args, expectedPort)
 	}
 }
 

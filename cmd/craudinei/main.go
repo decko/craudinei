@@ -18,6 +18,7 @@ import (
 	"github.com/decko/craudinei/internal/bot"
 	"github.com/decko/craudinei/internal/claude"
 	"github.com/decko/craudinei/internal/config"
+	"github.com/decko/craudinei/internal/mcp"
 	"github.com/decko/craudinei/internal/router"
 	"github.com/decko/craudinei/internal/types"
 
@@ -26,10 +27,30 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "mcp-shim" {
+		if err := runMCPShim(); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runMCPShim() error {
+	fs := flag.NewFlagSet("mcp-shim", flag.ExitOnError)
+	port := fs.Int("port", 0, "approval server port")
+	if err := fs.Parse(os.Args[2:]); err != nil {
+		return err
+	}
+	if *port == 0 {
+		return fmt.Errorf("mcp-shim: --port is required")
+	}
+	return mcp.Run(*port)
 }
 
 // run wires all components together, starts the bot and approval server,
