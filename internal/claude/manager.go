@@ -84,8 +84,8 @@ func (m *Manager) Start(ctx context.Context, workDir string) error {
 		return fmt.Errorf("manager: validating work directory: %w", err)
 	}
 
-	if _, ok := os.LookupEnv("ANTHROPIC_API_KEY"); !ok {
-		return fmt.Errorf("manager: ANTHROPIC_API_KEY environment variable is not set")
+	if err := checkClaudeAuth(); err != nil {
+		return err
 	}
 
 	args := []string{
@@ -600,8 +600,8 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("manager: validating work directory: %w", err)
 	}
 
-	if _, ok := os.LookupEnv("ANTHROPIC_API_KEY"); !ok {
-		return fmt.Errorf("manager: ANTHROPIC_API_KEY environment variable is not set")
+	if err := checkClaudeAuth(); err != nil {
+		return err
 	}
 
 	args := []string{
@@ -670,6 +670,21 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 }
 
 // slogWriter is an io.Writer that writes to slog.Error.
+var claudeAuthEnvVars = []string{
+	"ANTHROPIC_API_KEY",
+	"CLAUDE_CODE_USE_VERTEX",
+	"CLAUDE_CODE_USE_BEDROCK",
+}
+
+func checkClaudeAuth() error {
+	for _, v := range claudeAuthEnvVars {
+		if _, ok := os.LookupEnv(v); ok {
+			return nil
+		}
+	}
+	return fmt.Errorf("manager: no Claude auth configured — set one of: %v", claudeAuthEnvVars)
+}
+
 type slogWriter struct {
 	logger *slog.Logger
 }
