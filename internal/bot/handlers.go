@@ -146,6 +146,14 @@ func (h *Handlers) HandleBegin(ctx context.Context, api interface{}, update *Upd
 		h.auditLogger.Command(userID, "begin", workDir, "started", "")
 	}
 
+	// Auto-reset from crashed to idle before starting
+	if sm.Status() == types.StatusCrashed {
+		if err := sm.Transition(types.StatusIdle); err != nil {
+			h.sendReplyf(ctx, chatID, "Failed to reset session: %v", err)
+			return
+		}
+	}
+
 	// Transition to starting
 	if err := sm.Transition(types.StatusStarting); err != nil {
 		h.sendReplyf(ctx, chatID, "Failed to start session: %v", err)
